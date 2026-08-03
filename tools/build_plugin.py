@@ -34,6 +34,24 @@ def normalized_timestamp(value: str | None) -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def safe_banner_value(label: str, value: str) -> str:
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    if "\n" in value or "\r" in value or "]]" in value:
+        raise ValueError(f"{label} contains unsafe banner characters")
+    if any(ord(character) < 32 for character in value):
+        raise ValueError(f"{label} contains control characters")
+    return value
+
+
+def portable_source_path(source_path: Path) -> str:
+    resolved = source_path.resolve()
+    try:
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return source_path.name
+
+
 def build_banner(
     *,
     repository: str,
@@ -43,6 +61,12 @@ def build_banner(
     source_sha256: str,
     built_at: str,
 ) -> str:
+    repository = safe_banner_value("repository", repository)
+    version = safe_banner_value("version", version)
+    commit = safe_banner_value("commit", commit)
+    channel = safe_banner_value("channel", channel)
+    source_sha256 = safe_banner_value("source_sha256", source_sha256)
+    built_at = safe_banner_value("built_at", built_at)
     build_id = f"{version}-{commit[:12]}"
 
     return "\n".join(
@@ -83,9 +107,17 @@ def build_artifact(
     if not source_path.is_file():
         raise FileNotFoundError(f"Plugin source not found: {source_path}")
 
+    repository = safe_banner_value("repository", repository)
+    version = safe_banner_value("version", version)
+    commit = safe_banner_value("commit", commit)
+    channel = safe_banner_value("channel", channel)
+    timestamp = safe_banner_value(
+        "built_at",
+        normalized_timestamp(built_at),
+    )
+
     source_bytes = source_path.read_bytes()
     source_sha256 = sha256_bytes(source_bytes)
-    timestamp = normalized_timestamp(built_at)
 
     banner = build_banner(
         repository=repository,
@@ -121,7 +153,7 @@ def build_artifact(
             "bannerIsProof": False,
         },
         "source": {
-            "path": source_path.as_posix(),
+            "path": portable_source_path(source_path),
             "sha256": source_sha256,
         },
         "artifact": {
