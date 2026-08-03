@@ -37,8 +37,7 @@ All Luau entry points remain guarded by `RunService:IsStudio()` and the `Harness
 
 ## Validation boundary
 
-Python syntax and encoder tests were run against the generated source before publication. Repository checks confirm the configuration, Studio guards, runtime files, Flask bridge, documentation, and plugin source. A Roblox Studio playtest is still required for Luau runtime behavior and DockWidget rendering verification.
-
+Python syntax and encoder tests were run against the generated source before publication. Repository checks confirm the configuration, Studio guards, runtime files, Flask bridge, documentation, and plugin source. Automated CI now runs on pushes and pull requests targeting `main`. A Roblox Studio playtest is still required for Luau runtime behavior and DockWidget rendering verification.
 
 ## Audit remediation
 
