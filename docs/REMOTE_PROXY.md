@@ -103,3 +103,11 @@ AutoProxy.wrapFolder(folder: Instance): table
 ```
 
 The remaining behavior, return-table shape, descendant tracking rules, cleanup API, and handling of future remotes need to be specified before implementation.
+
+## Studio-only execution
+
+HarnessX remains Studio-only.
+
+The `HarnessXEnabled` attribute is an additional opt-in gate inside Studio. It does not bypass `RunService:IsStudio()`.
+
+Running HarnessX in a published live client is not supported out of the box. To run it in a live client, you would need to maintain a separate unsupported fork with the Studio guards manually removed from the Luau files. This configuration is not tested, recommended, or supported by the HarnessX project.
