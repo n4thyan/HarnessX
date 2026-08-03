@@ -39,7 +39,28 @@ class RepositoryContractTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             for term in forbidden:
                 self.assertNotIn(term, source, f"{term} in {path}")
-        self.assertFalse((ROOT / "EXECUTOR_BUILD.md").exists())
+
+    def test_executor_document_is_a_safety_boundary_only(self) -> None:
+        path = ROOT / "EXECUTOR_BUILD.md"
+        self.assertTrue(path.exists())
+        source = path.read_text(encoding="utf-8")
+        lower = source.lower()
+
+        self.assertIn("does not provide or support a live roblox executor build", lower)
+        self.assertIn("no implementation instructions or code", lower)
+        self.assertIn("runservice:isstudio()", lower)
+
+        forbidden_instructions = (
+            "readprocessmemory(",
+            "writeprocessmemory(",
+            "openprocess(",
+            "hookmetamethod(",
+            "getrawmetatable(",
+            "remove the studio guard from",
+            "inject harnessx using",
+        )
+        for term in forbidden_instructions:
+            self.assertNotIn(term, lower)
 
     def test_rewriter_regression_markers_exist(self) -> None:
         source = (ROOT / "roblox" / "Plugin.lua").read_text(encoding="utf-8")
