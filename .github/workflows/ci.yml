@@ -1,0 +1,29 @@
+name: HarnessX CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.lock
+      - run: python -m compileall -q server tests
+      - run: python -m json.tool config.json >/dev/null
+      - run: python -m unittest discover -s tests -v
+        env:
+          HARNESSX_BRIDGE_TOKEN: ci-token-that-is-long-enough
+          HARNESSX_DISABLE_SCANNER: "1"

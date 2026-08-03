@@ -10,6 +10,7 @@ if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 ]]
 
 local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BRIDGE_URL = "http://127.0.0.1:8765"
@@ -90,39 +91,6 @@ local getPerformanceStats = ensureChild(
 	"GetPerformanceStats"
 ) :: BindableFunction
 
-local function initializeAutoProxyQuickStart()
-	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
-	if remotesFolder == nil then
-		return
-	end
-
-	local autoProxyModule = packageFolder:FindFirstChild("AutoProxy")
-	if autoProxyModule == nil or not autoProxyModule:IsA("ModuleScript") then
-		warn("HarnessX quick start skipped: ReplicatedStorage.HarnessX.AutoProxy is missing.")
-		return
-	end
-
-	local requireOk, AutoProxy = pcall(require, autoProxyModule)
-	if not requireOk or typeof(AutoProxy) ~= "table" then
-		warn("HarnessX quick start failed to load AutoProxy: " .. tostring(AutoProxy))
-		return
-	end
-
-	local wrapOk, wrapped = pcall(AutoProxy.wrapFolder, remotesFolder)
-	if not wrapOk then
-		warn("HarnessX quick start failed to wrap ReplicatedStorage.Remotes: " .. tostring(wrapped))
-		return
-	end
-
-	-- _G is scoped to this Luau VM. Core normally runs on the server, so
-	-- client code that needs FireServer/InvokeServer proxies should call
-	-- AutoProxy.wrapFolder() from its own LocalScript VM.
-	_G.HarnessXRemotes = wrapped
-	print("HarnessX quick start: _G.HarnessXRemotes is ready.")
-end
-
-task.defer(initializeAutoProxyQuickStart)
-
 local function httpRequest(path: string, method: string, body: string?): (boolean, any)
 	local options: {[string]: any} = {
 		Url = BRIDGE_URL .. path,
@@ -185,6 +153,21 @@ local profilingConfig = if typeof(publicConfig.profiling) == "table"
 		enabled = true,
 		window_seconds = 60,
 	}
+local runtimeConfig = if typeof(publicConfig.runtime) == "table"
+	then publicConfig.runtime
+	else {}
+local MAX_PENDING_EVENTS = math.max(tonumber(runtimeConfig.max_pending_events) or 2000, 1)
+local MAX_EVENTS_PER_PLAYER_PER_SECOND = math.max(
+	tonumber(runtimeConfig.max_events_per_player_per_second) or 200,
+	1
+)
+local MAX_EVENT_BYTES = math.max(tonumber(runtimeConfig.max_event_bytes) or 65536, 1024)
+local MAX_BATCH_RETRIES = math.max(tonumber(runtimeConfig.max_batch_retries) or 3, 1)
+
+packageFolder:SetAttribute(
+	"HarnessXSUNCMode",
+	string.lower(tostring(publicConfig.sunc_mode or "observe"))
+)
 
 assert(typeof(runtimeProfile) == "table", "Bridge profile is missing")
 assert(typeof(runtimeProfile.scan_interval_ms) == "number", "Invalid scan_interval_ms")
@@ -334,10 +317,19 @@ local function postEncoded(path: string, kind: string, payload: any): (boolean, 
 	return httpRequest(path, "POST", body)
 end
 
-local queue: {any} = {}
+type QueueEntry = {
+	payload: any,
+	retries: number,
+}
+
+local queue: {QueueEntry} = {}
 local queueHead = 1
 local queueTail = 0
 local flushing = false
+local droppedEventCount = 0
+local flushFailureCount = 0
+local consecutiveFlushFailures = 0
+local nextFlushAt = 0
 
 local function queueSize(): number
 	if queueTail < queueHead then
@@ -347,12 +339,32 @@ local function queueSize(): number
 	return queueTail - queueHead + 1
 end
 
-local function enqueue(item: any)
-	queueTail += 1
-	queue[queueTail] = item
+local function dropOldestQueueEntry()
+	if queueHead <= queueTail then
+		queue[queueHead] = nil
+		queueHead += 1
+		droppedEventCount += 1
+	end
+
+	if queueHead > queueTail then
+		queueHead = 1
+		queueTail = 0
+	end
 end
 
-local function dequeueBatch(maxItems: number): {any}
+local function enqueue(item: any, retries: number?)
+	while queueSize() >= MAX_PENDING_EVENTS do
+		dropOldestQueueEntry()
+	end
+
+	queueTail += 1
+	queue[queueTail] = {
+		payload = item,
+		retries = retries or 0,
+	}
+end
+
+local function dequeueBatch(maxItems: number): {QueueEntry}
 	local batch = table.create(maxItems)
 	local count = 0
 
@@ -417,12 +429,49 @@ type LatencySample = {
 
 local latencySamplesByRemote: {[string]: {LatencySample}} = {}
 
+local playerRateLimits: {[Player]: {windowStart: number, count: number}} = {}
+
+local function acceptClientMessage(player: Player, message: any): (boolean, string?)
+	if typeof(message) ~= "table" then
+		return false, "message_not_table"
+	end
+
+	local now = os.clock()
+	local bucket = playerRateLimits[player]
+	if bucket == nil or now - bucket.windowStart >= 1 then
+		bucket = { windowStart = now, count = 0 }
+		playerRateLimits[player] = bucket
+	end
+
+	bucket.count += 1
+	if bucket.count > MAX_EVENTS_PER_PLAYER_PER_SECOND then
+		return false, "rate_limited"
+	end
+
+	local encodedOk, encoded = pcall(function()
+		return HttpService:JSONEncode(serialize(message))
+	end)
+	if not encodedOk then
+		return false, "message_not_serializable"
+	end
+	if #encoded > MAX_EVENT_BYTES then
+		return false, "message_too_large"
+	end
+
+	return true, nil
+end
+
 local function recordSuncLatency(message: any)
 	if profilingConfig.enabled ~= true or typeof(message) ~= "table" then
 		return
 	end
 
-	if message.channel ~= "SUNC" or typeof(message.durationMs) ~= "number" then
+	if message.channel ~= "SUNC" then
+		return
+	end
+
+	local measuredDuration = message.remoteDurationMs or message.durationMs
+	if typeof(measuredDuration) ~= "number" then
 		return
 	end
 
@@ -441,7 +490,7 @@ local function recordSuncLatency(message: any)
 
 	table.insert(samples, {
 		at = DateTime.now().UnixTimestampMillis,
-		durationMs = math.max(0, message.durationMs),
+		durationMs = math.max(0, measuredDuration),
 	})
 end
 
@@ -691,6 +740,12 @@ getScriptStack.OnInvoke = pushStackDump
 getPerformanceStats.OnInvoke = calculatePerformanceStats
 
 trackConnection(debugEvent.OnServerEvent:Connect(function(player: Player, message: any)
+	local accepted = acceptClientMessage(player, message)
+	if not accepted then
+		droppedEventCount += 1
+		return
+	end
+
 	rememberCall(message)
 	recordSuncLatency(message)
 
@@ -704,7 +759,22 @@ trackConnection(debugEvent.OnServerEvent:Connect(function(player: Player, messag
 	})
 end))
 
+trackConnection(Players.PlayerRemoving:Connect(function(player: Player)
+	playerRateLimits[player] = nil
+end))
+
 debugFunction.OnServerInvoke = function(player: Player, message: any)
+	local accepted, rejectionReason = acceptClientMessage(player, message)
+	if not accepted then
+		droppedEventCount += 1
+		return {
+			ok = false,
+			mode = "observe",
+			mockReturns = {},
+			error = rejectionReason,
+		}
+	end
+
 	rememberCall(message)
 
 	local ok, response = postEncoded("/v1/invoke", "sunc_preflight", {
@@ -729,6 +799,16 @@ debugFunction.OnServerInvoke = function(player: Player, message: any)
 end
 
 fuzzControl.OnServerInvoke = function(player: Player, action: any, sessionId: any)
+	local accepted, rejectionReason = acceptClientMessage(player, {
+		channel = "FUZZ_CONTROL",
+		action = action,
+		sessionId = sessionId,
+	})
+	if not accepted then
+		droppedEventCount += 1
+		return { ok = false, error = rejectionReason }
+	end
+
 	local actionName = tostring(action)
 
 	if actionName == "claim" then
@@ -772,6 +852,12 @@ fuzzControl.OnServerInvoke = function(player: Player, action: any, sessionId: an
 end
 
 trackConnection(fuzzReport.OnServerEvent:Connect(function(player: Player, message: any)
+	local accepted = acceptClientMessage(player, message)
+	if not accepted then
+		droppedEventCount += 1
+		return
+	end
+
 	if typeof(message) ~= "table" or typeof(message.sessionId) ~= "string" then
 		return
 	end
@@ -810,6 +896,50 @@ trackConnection(fuzzReport.OnServerEvent:Connect(function(player: Player, messag
 	end)
 end))
 
+local function requeueFailedBatch(batch: {QueueEntry})
+	for _, entry in batch do
+		if entry.retries < MAX_BATCH_RETRIES then
+			enqueue(entry.payload, entry.retries + 1)
+		else
+			droppedEventCount += 1
+		end
+	end
+end
+
+local function flushBatch(batch: {QueueEntry})
+	local payloadBatch = table.create(#batch)
+	for index, entry in batch do
+		payloadBatch[index] = entry.payload
+	end
+
+	local requestOk = false
+	local requestResult: any = nil
+	local executionOk, executionError = xpcall(function()
+		requestOk, requestResult = postEncoded("/v1/ingest", "remote_batch", {
+			profile = runtimeProfileName,
+			records = payloadBatch,
+		})
+	end, debug.traceback)
+
+	if not executionOk then
+		requestOk = false
+		requestResult = executionError
+	end
+
+	if requestOk then
+		consecutiveFlushFailures = 0
+		nextFlushAt = 0
+	else
+		flushFailureCount += 1
+		consecutiveFlushFailures += 1
+		nextFlushAt = os.clock() + math.min(2 ^ (consecutiveFlushFailures - 1), 30)
+		requeueFailedBatch(batch)
+		warn("HarnessX batch post failed: " .. tostring(requestResult))
+	end
+
+	flushing = false
+end
+
 task.spawn(function()
 	while true do
 		local intervalSeconds = math.max(
@@ -819,23 +949,11 @@ task.spawn(function()
 
 		task.wait(intervalSeconds)
 
-		if not flushing and queueSize() > 0 then
+		if not flushing and queueSize() > 0 and os.clock() >= nextFlushAt then
 			flushing = true
 			local batchSize = math.max(1, math.floor(runtimeProfile.batch_size))
 			local batch = dequeueBatch(batchSize)
-
-			task.spawn(function()
-				local ok, result = postEncoded("/v1/ingest", "remote_batch", {
-					profile = runtimeProfileName,
-					records = batch,
-				})
-
-				if not ok then
-					warn("HarnessX batch post failed: " .. tostring(result))
-				end
-
-				flushing = false
-			end)
+			task.spawn(flushBatch, batch)
 		end
 	end
 end)
@@ -857,6 +975,11 @@ task.spawn(function()
 			if typeof(status.profiling) == "table" then
 				profilingConfig = status.profiling
 			end
+
+			packageFolder:SetAttribute(
+				"HarnessXSUNCMode",
+				string.lower(tostring(status.suncMode or "observe"))
+			)
 
 			local diagnosticTriggerId = tonumber(status.diagnosticTriggerId) or 0
 			if diagnosticTriggerId > lastDiagnosticTriggerId then
@@ -889,6 +1012,8 @@ task.spawn(function()
 		task.spawn(function()
 			postEncoded("/v1/runtime/status", "runtime_status", {
 				pendingQueueSize = queueSize(),
+				droppedEventCount = droppedEventCount,
+				flushFailureCount = flushFailureCount,
 				profile = runtimeProfileName,
 				capturedAt = DateTime.now().UnixTimestampMillis,
 			})

@@ -50,6 +50,10 @@ end
 local configOk, bridgeConfig = request("/v1/config", "GET", nil)
 if not configOk or typeof(bridgeConfig) ~= "table" then bridgeConfig = {} end
 local pluginConfig = if typeof(bridgeConfig.plugin) == "table" then bridgeConfig.plugin else {}
+if pluginConfig.enabled == false then
+	warn("HarnessX plugin is disabled by config.json")
+	return nil
+end
 local fuzzerConfig = if typeof(bridgeConfig.fuzzer) == "table" then bridgeConfig.fuzzer else {}
 local excludeAttribute = tostring(pluginConfig.exclude_scripts_with_attribute or IGNORE_ATTRIBUTE)
 local wrapperStyle = if string.lower(tostring(pluginConfig.wrapper_style or "UNC")) == "remoteproxy"
@@ -79,7 +83,7 @@ local function scripts(): {Instance}
 	return result
 end
 
-local function skipString(source: string, index: number): number
+local function skipQuotedString(source: string, index: number): number
 	local quote = source:sub(index, index)
 	local cursor = index + 1
 	while cursor <= #source do
@@ -91,6 +95,21 @@ local function skipString(source: string, index: number): number
 	return #source + 1
 end
 
+local function longBracketEnd(source: string, index: number): number?
+	local equals = source:sub(index):match("^%[(=*)%[")
+	if equals == nil then return nil end
+	local closeToken = "]" .. equals .. "]"
+	local contentStart = index + #equals + 2
+	local closeStart = source:find(closeToken, contentStart, true)
+	return if closeStart ~= nil then closeStart + #closeToken else #source + 1
+end
+
+local function maskRange(output: {string}, source: string, first: number, finish: number)
+	for position = first, finish - 1 do
+		output[position] = if source:sub(position, position) == "\n" then "\n" else " "
+	end
+end
+
 local function codeMask(source: string): string
 	local output = table.create(#source)
 	local index = 1
@@ -98,13 +117,23 @@ local function codeMask(source: string): string
 		local one = source:sub(index, index)
 		local two = source:sub(index, index + 1)
 		if two == "--" then
-			local newline = source:find("\n", index + 2, true) or (#source + 1)
-			for position = index, newline - 1 do output[position] = " " end
-			index = newline
-		elseif one == "'" or one == '"' or one == "`" then
-			local finish = skipString(source, index)
-			for position = index, finish - 1 do output[position] = " " end
+			local blockFinish = longBracketEnd(source, index + 2)
+			local finish = blockFinish or (source:find("\n", index + 2, true) or (#source + 1))
+			maskRange(output, source, index, finish)
 			index = finish
+		elseif one == "'" or one == '"' or one == "`" then
+			local finish = skipQuotedString(source, index)
+			maskRange(output, source, index, finish)
+			index = finish
+		elseif one == "[" then
+			local finish = longBracketEnd(source, index)
+			if finish ~= nil then
+				maskRange(output, source, index, finish)
+				index = finish
+			else
+				output[index] = one
+				index += 1
+			end
 		else
 			output[index] = one
 			index += 1
@@ -134,27 +163,43 @@ local function receiverStart(mask: string, colon: number): number
 	return index + 1
 end
 
+local function prependInstrumentationHeader(source: string, header: string): string
+	local insertion = 1
+	local cursor = 1
+	while cursor <= #source do
+		local newline = source:find("\n", cursor, true)
+		local finish = newline or (#source + 1)
+		local line = source:sub(cursor, finish - 1)
+		if line:match("^%s*%-%-!") == nil then break end
+		insertion = finish + (if newline ~= nil then 1 else 0)
+		cursor = insertion
+	end
+	return source:sub(1, insertion - 1) .. header .. source:sub(insertion)
+end
+
 local function rewriteSource(source: string): (string, number)
 	local rewritten = source
 	local count = 0
 	while count < 1000 do
 		local mask = codeMask(rewritten)
-		local bestStart, bestOpen, bestMethod
+		local bestColon, bestOpen, bestMethod, bestReceiverStart
 		for _, method in { "FireServer", "InvokeServer" } do
 			local cursor = 1
 			while true do
 				local colon, methodEnd = mask:find(":" .. method .. "%s*%(", cursor)
 				if not colon then break end
 				local open = mask:find("(", colon, true)
-				if open and (not bestStart or colon > bestStart) then
-					bestStart, bestOpen, bestMethod = colon, open, method
+				local start = receiverStart(mask, colon)
+				local receiverMask = mask:sub(start, colon - 1)
+				local alreadyProxy = receiverMask:match("^%s*__rp%.wrap%s*%(") ~= nil
+				if open and not alreadyProxy and (not bestColon or colon > bestColon) then
+					bestColon, bestOpen, bestMethod, bestReceiverStart = colon, open, method, start
 				end
 				cursor = methodEnd + 1
 			end
 		end
-		if not bestStart or not bestOpen or not bestMethod then break end
-		local start = receiverStart(mask, bestStart)
-		local receiver = rewritten:sub(start, bestStart - 1)
+		if not bestColon or not bestOpen or not bestMethod or not bestReceiverStart then break end
+		local receiver = rewritten:sub(bestReceiverStart, bestColon - 1)
 		local afterOpen = mask:match("^%s*%)", bestOpen + 1) ~= nil
 		local replacement: string
 		if wrapperStyle == "RemoteProxy" then
@@ -163,7 +208,7 @@ local function rewriteSource(source: string): (string, number)
 			local wrapper = if bestMethod == "FireServer" then "UNC.FireServer" else "SUNC.InvokeServer"
 			replacement = wrapper .. "(" .. receiver .. (if afterOpen then "" else ", ")
 		end
-		rewritten = rewritten:sub(1, start - 1) .. replacement .. rewritten:sub(bestOpen + 1)
+		rewritten = rewritten:sub(1, bestReceiverStart - 1) .. replacement .. rewritten:sub(bestOpen + 1)
 		count += 1
 	end
 	if count > 0 then
@@ -179,7 +224,7 @@ local function rewriteSource(source: string): (string, number)
 						"-- </HarnessX:instrumented>",
 						"",
 					}, "\n")
-					rewritten = header .. rewritten
+					rewritten = prependInstrumentationHeader(rewritten, header)
 				end
 			end
 		elseif not rewritten:find(HEADER, 1, true) then
@@ -192,7 +237,7 @@ local function rewriteSource(source: string): (string, number)
 				"-- </HarnessX:instrumented>",
 				"",
 			}, "\n")
-			rewritten = header .. rewritten
+			rewritten = prependInstrumentationHeader(rewritten, header)
 		end
 	end
 	return rewritten, count
@@ -302,14 +347,96 @@ local function button(parent: Instance, text: string, callback: () -> ()): TextB
 	return result
 end
 
+local function instancePathSegments(instance: Instance): {string}
+	local result = {}
+	local current: Instance? = instance
+	while current ~= nil and current ~= game do
+		table.insert(result, 1, current.Name)
+		current = current.Parent
+	end
+	return result
+end
+
 local function backupAll()
-	local sourceMap: {[string]: string} = {}
+	local sourceEntries = {}
 	for _, target in scripts() do
 		local ok, source = pcall(function() return ScriptEditorService:GetEditorSource(target :: any) end)
-		if ok then sourceMap[target:GetFullName()] = source end
+		if ok then
+			table.insert(sourceEntries, {
+				path = target:GetFullName(),
+				segments = instancePathSegments(target),
+				className = target.ClassName,
+				source = source,
+			})
+		end
 	end
-	local ok, response = request("/v1/backup/sources", "POST", { sources = sourceMap })
+	local ok, response = request("/v1/backup/sources", "POST", { sources = sourceEntries })
 	status.Text = if ok then "Backup: " .. tostring(response.folder) else "Backup failed: " .. tostring(response)
+end
+
+local function matchingParen(mask: string, open: number): number?
+	local depth = 0
+	for index = open, #mask do
+		local character = mask:sub(index, index)
+		if character == "(" then depth += 1
+		elseif character == ")" then
+			depth -= 1
+			if depth == 0 then return index end
+		end
+	end
+	return nil
+end
+
+local function traceInstrumentedCalls(source: string): string
+	local mask = codeMask(source)
+	local ranges = {}
+	for _, definition in {
+		{ pattern = "UNC%.FireServer%s*%(", kind = "UNC" },
+		{ pattern = "SUNC%.InvokeServer%s*%(", kind = "SUNC" },
+	} do
+		local cursor = 1
+		while true do
+			local first = mask:find(definition.pattern, cursor)
+			if first == nil then break end
+			local open = mask:find("(", first, true)
+			local finish = if open ~= nil then matchingParen(mask, open) else nil
+			if finish == nil then break end
+			table.insert(ranges, { first = first, finish = finish, kind = definition.kind })
+			cursor = finish + 1
+		end
+	end
+
+	local cursor = 1
+	while true do
+		local first = mask:find("__rp%.wrap%s*%(", cursor)
+		if first == nil then break end
+		local wrapOpen = mask:find("(", first, true)
+		local wrapFinish = if wrapOpen ~= nil then matchingParen(mask, wrapOpen) else nil
+		if wrapFinish == nil then break end
+		local tail = mask:sub(wrapFinish + 1)
+		local _, fireEnd = tail:find("^%s*:%s*FireServer%s*%(")
+		local _, invokeEnd = tail:find("^%s*:%s*InvokeServer%s*%(")
+		local tailEnd = fireEnd or invokeEnd
+		if tailEnd ~= nil then
+			local callOpen = mask:find("(", wrapFinish + 1, true)
+			local callFinish = if callOpen ~= nil then matchingParen(mask, callOpen) else nil
+			if callFinish ~= nil then
+				table.insert(ranges, { first = first, finish = callFinish, kind = "RemoteProxy" })
+				cursor = callFinish + 1
+				continue
+			end
+		end
+		cursor = wrapFinish + 1
+	end
+
+	table.sort(ranges, function(a, b) return a.first > b.first end)
+	local rewritten = source
+	for _, range in ranges do
+		local call = rewritten:sub(range.first, range.finish)
+		local replacement = '__HarnessTrace("' .. range.kind .. '", function() return ' .. call .. ' end)'
+		rewritten = rewritten:sub(1, range.first - 1) .. replacement .. rewritten:sub(range.finish + 1)
+	end
+	return rewritten
 end
 
 local function injectTrace(target: Instance)
@@ -317,6 +444,8 @@ local function injectTrace(target: Instance)
 	if not recording then return end
 	local changed, updateError = updateScript(target, function(source)
 		if source:find("-- <HarnessX:trace-injected>", 1, true) then return source end
+		local traced = traceInstrumentedCalls(source)
+		if traced == source then return source end
 		local helper = table.concat({
 			"-- <HarnessX:trace-injected>",
 			"local function __HarnessTrace(kind, callback)",
@@ -329,12 +458,10 @@ local function injectTrace(target: Instance)
 			"-- </HarnessX:trace-injected>",
 			"",
 		}, "\n")
-		source = source:gsub("UNC%.FireServer(%b())", function(call) return '__HarnessTrace("UNC", function() return UNC.FireServer' .. call .. ' end)' end)
-		source = source:gsub("SUNC%.InvokeServer(%b())", function(call) return '__HarnessTrace("SUNC", function() return SUNC.InvokeServer' .. call .. ' end)' end)
-		return helper .. source
+		return prependInstrumentationHeader(traced, helper)
 	end)
 	ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
-	status.Text = if updateError then updateError elseif changed then "Trace injected" else "Trace already present"
+	status.Text = if updateError then updateError elseif changed then "Trace injected" else "No untraced wrapper calls found"
 end
 
 local function refreshScripts()
@@ -428,7 +555,7 @@ local function parseSchema(text: string): ({any}?, string?)
 		elseif kind == "string" then descriptor = { __type = "RandomString", length = options.length or 12 }
 		elseif kind == "boolean" then descriptor = { __type = "RandomBoolean" }
 		elseif kind == "vector3" then descriptor = { __type = "RandomVector3", min = options.min or -100, max = options.max or 100 }
-		elseif kind == "cframe" then descriptor = { __type = "RandomCFrame", min = options.min or -100, max = options.max or 100 }
+		elseif kind == "cframe" then descriptor = { __type = "RandomCFrame", min = options.min or -100, max = options.max or 100, maxRotationDegrees = options.maxrotation or options.maxrotationdegrees or 90 }
 		elseif kind == "instance" then descriptor = { __type = "InstancePath", path = options.path or "" }
 		elseif kind == "enumitem" then descriptor = { __type = "EnumItem", value = options.value or "" }
 		else return nil, "Unsupported descriptor: " .. kind end

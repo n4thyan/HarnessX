@@ -38,3 +38,17 @@ All Luau entry points remain guarded by `RunService:IsStudio()` and the `Harness
 ## Validation boundary
 
 Python syntax and encoder tests were run against the generated source before publication. Repository checks confirm the configuration, Studio guards, runtime files, Flask bridge, documentation, and plugin source. A Roblox Studio playtest is still required for Luau runtime behavior and DockWidget rendering verification.
+
+
+## Audit remediation
+
+- Default bridge credentials are replaced on first start or supplied through `HARNESSX_BRIDGE_TOKEN`.
+- Browser origins and CORS preflights are rejected.
+- Runtime traffic is rate-limited, size-limited, bounded, and retried with a fixed cap.
+- SUNC latency separates target-remote time from HarnessX preflight overhead.
+- Source auto-rewrite is disabled by default and the rewriter masks quoted strings, long strings, line comments, and block comments.
+- Backups use path-segment arrays and deterministic collision suffixes.
+- Completed fuzz sessions are retained in a bounded history.
+- CI performs Python tests and repository security-contract checks.
+
+A Roblox Studio playtest is still required to validate Luau behavior and DockWidget rendering.

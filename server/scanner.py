@@ -101,6 +101,7 @@ class StudioMetricsScanner:
     ) -> None:
         self._process_names = tuple(process_names)
         self._interval_seconds = max(interval_ms / 1000.0, 0.05)
+        self._interval_lock = threading.Lock()
         self._on_snapshot = on_snapshot
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -121,10 +122,21 @@ class StudioMetricsScanner:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
+    def set_interval_ms(self, interval_ms: int) -> None:
+        """Update the sampling interval without restarting the scanner thread."""
+        with self._interval_lock:
+            self._interval_seconds = max(interval_ms / 1000.0, 0.05)
+
     def _run(self) -> None:
         process: psutil.Process | None = None
 
-        while not self._stop_event.wait(self._interval_seconds):
+        while True:
+            with self._interval_lock:
+                interval_seconds = self._interval_seconds
+
+            if self._stop_event.wait(interval_seconds):
+                break
+
             if process is None or not process.is_running():
                 process = find_studio_process(self._process_names)
                 if process is None:
