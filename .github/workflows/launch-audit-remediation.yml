@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - ".github/workflows/launch-audit-remediation.yml"
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -53,11 +56,3 @@ jobs:
           git add -A
           git commit -m "Harden HarnessX runtime and bridge"
           git push origin HEAD:audit-remediation
-
-      - name: Remove launcher from main
-        shell: bash
-        run: |
-          git checkout main
-          git rm .github/workflows/launch-audit-remediation.yml
-          git commit -m "Remove audit remediation launcher"
-          git push origin HEAD:main
