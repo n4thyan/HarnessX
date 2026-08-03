@@ -1,0 +1,82 @@
+name: HarnessX verifiable build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label placed in the build manifest
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve reproducible build metadata
+        id: metadata
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+            channel="tag-release"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            version="${INPUT_VERSION}"
+            channel="manual-release"
+          else
+            version="manual-${GITHUB_SHA::12}"
+            channel="manual-release"
+          fi
+
+          safe_version="${version//\//-}"
+          built_at="$(git show -s --format=%cI "${GITHUB_SHA}")"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+          echo "built_at=${built_at}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=HarnessX-${safe_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build plugin artifact
+        run: |
+          python tools/build_plugin.py \
+            --version "${{ steps.metadata.outputs.version }}" \
+            --commit "${GITHUB_SHA}" \
+            --channel "${{ steps.metadata.outputs.channel }}" \
+            --built-at "${{ steps.metadata.outputs.built_at }}" \
+            --output-dir dist
+
+      - name: Verify generated checksums
+        run: python tools/verify_build.py dist/HarnessXPlugin.manifest.json
+
+      - name: Upload verifiable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            dist/HarnessXPlugin.lua
+            dist/HarnessXPlugin.manifest.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"

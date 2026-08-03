@@ -9,6 +9,10 @@ venv/
 backups/
 *.log
 
+# Generated provenance builds
+dist/
+.provenance-ci/
+
 # Roblox/Studio build output
 *.rbxl
 *.rbxlx

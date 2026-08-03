@@ -50,4 +50,10 @@ Python syntax and encoder tests were run against the generated source before pub
 - Completed fuzz sessions are retained in a bounded history.
 - CI performs Python tests and repository security-contract checks.
 
+## Verifiable build pipeline
+
+HarnessX can now generate a reproducible `HarnessXPlugin.lua` artifact with an adjacent JSON manifest and `SHA256SUMS` file. CI checks reproducibility and rejects modified artifacts. Version-tag and manual release workflows upload the generated files and create GitHub build-provenance attestations.
+
+The embedded checksum banner is identification metadata only. A valid digest and GitHub attestation from `n4thyan/HarnessX` are required to establish official origin. See `PROVENANCE.md` for build and verification commands.
+
 A Roblox Studio playtest is still required to validate Luau behavior and DockWidget rendering.

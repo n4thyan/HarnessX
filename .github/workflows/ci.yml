@@ -21,9 +21,19 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.lock
-      - run: python -m compileall -q server tests
+      - run: python -m compileall -q server tests tools
       - run: python -m json.tool config.json >/dev/null
       - run: python -m unittest discover -s tests -v
         env:
           HARNESSX_BRIDGE_TOKEN: ci-token-that-is-long-enough
           HARNESSX_DISABLE_SCANNER: "1"
+      - name: Build deterministic provenance fixture
+        run: |
+          python tools/build_plugin.py \
+            --version ci \
+            --commit "${GITHUB_SHA}" \
+            --channel ci \
+            --built-at "1970-01-01T00:00:00Z" \
+            --output-dir .provenance-ci
+      - name: Verify provenance fixture
+        run: python tools/verify_build.py .provenance-ci/HarnessXPlugin.manifest.json

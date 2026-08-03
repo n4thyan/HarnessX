@@ -15,11 +15,15 @@ Passed:
 - Python fuzz-session create/claim/status/stop smoke flow
 - Python timestamped backup smoke flow
 - Encoder round-trip checks for 1, 2, 3, 4, and 16 rounds
+- Reproducible plugin artifact generation for identical inputs
+- Artifact, manifest, and SHA256SUMS consistency checks
+- Tampered plugin artifact rejection
 
 Not performed in this environment:
 - Roblox Studio/Luau runtime execution
 - Live playtest client/server fuzz run
 - DockWidget rendering verification
+- GitHub artifact-attestation verification outside a release workflow
 
 Automated on every push and pull request:
 - Python syntax compilation
@@ -30,3 +34,13 @@ Automated on every push and pull request:
 - Studio guard and configuration contract checks
 - Current-tree scan for unsupported process-memory and engine-hook APIs
 - Source-rewriter guards for RemoteProxy recursion, long strings/comments, directive placement, and Luau-compatible trace patterns
+- Deterministic provenance fixture build and local checksum verification
+- Provenance tamper-detection tests
+
+Automated for version tags and manual release builds:
+- Deterministic `HarnessXPlugin.lua` generation
+- Source and artifact SHA-256 manifest generation
+- `SHA256SUMS` generation
+- Local verification before upload
+- GitHub artifact upload
+- GitHub build-provenance attestation
