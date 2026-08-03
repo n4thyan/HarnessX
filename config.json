@@ -1,0 +1,65 @@
+{
+  "bridge": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "token": "change-this-local-token-please",
+    "max_body_bytes": 8388608
+  },
+  "active_profile": "medium",
+  "profiles": {
+    "high": {
+      "scan_interval_ms": 100,
+      "batch_size": 128,
+      "encoder_rounds": 4
+    },
+    "medium": {
+      "scan_interval_ms": 250,
+      "batch_size": 64,
+      "encoder_rounds": 3
+    },
+    "low": {
+      "scan_interval_ms": 750,
+      "batch_size": 24,
+      "encoder_rounds": 2
+    },
+    "potato": {
+      "scan_interval_ms": 1500,
+      "batch_size": 8,
+      "encoder_rounds": 1
+    }
+  },
+  "sunc": {
+    "mode": "observe",
+    "mock_returns": [
+      true,
+      "mock reply from Flask"
+    ]
+  },
+  "scanner": {
+    "enabled": true,
+    "process_names": [
+      "RobloxStudioBeta.exe",
+      "RobloxStudio.exe",
+      "RobloxStudio"
+    ],
+    "print_every_samples": 10
+  },
+  "plugin": {
+    "enabled": true,
+    "exclude_scripts_with_attribute": "HarnessXIgnore",
+    "auto_rewrite_on_save": true
+  },
+  "fuzzer": {
+    "default_rate": 5,
+    "max_rate": 100,
+    "default_duration_seconds": 30
+  },
+  "backup": {
+    "output_dir": "./backups",
+    "max_backups": 50
+  },
+  "profiling": {
+    "enabled": true,
+    "window_seconds": 60
+  }
+}
