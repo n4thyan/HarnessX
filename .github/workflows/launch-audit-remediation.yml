@@ -17,50 +17,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply staged remediation to branch
+      - name: Apply quality remediation to branch
         shell: bash
         run: |
           git fetch origin audit-remediation:audit-remediation
           git checkout audit-remediation
-          python - <<'PY'
-          from pathlib import Path
-          import base64
-          import gzip
-          import re
-          import subprocess
-
-          workflow = subprocess.check_output(
-              [
-                  "git",
-                  "show",
-                  "270750059f08ec32c923ad49e570e5792c1982b4:.github/workflows/apply-audit-runtime.yml",
-              ],
-              text=True,
-          )
-          match = re.search(r"echo '([^']+)' \| base64 -d", workflow)
-          if match is None:
-              raise SystemExit("immutable remediation payload not found")
-
-          payload = gzip.decompress(base64.b64decode(match.group(1))).decode("utf-8")
-          payload = payload.replace(
-              "re.subn(pattern, replacement, text, count=1, flags=re.S)",
-              "re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)",
-          )
-          Path("/tmp/apply_audit_runtime.py").write_text(payload, encoding="utf-8")
-          PY
-          python /tmp/apply_audit_runtime.py
-          python -m compileall -q server
+          test -f tools/apply_audit_quality.py
+          python tools/apply_audit_quality.py
+          python -m compileall -q server tests
           python -m json.tool config.json >/dev/null
-          grep -q 'DEFAULT_BRIDGE_TOKEN' server/main.py
-          grep -q 'browser_origins_forbidden' server/main.py
-          grep -q 'set_interval_ms' server/scanner.py
-          grep -q 'MAX_PENDING_EVENTS' roblox/Core.lua
-          grep -q 'remoteDurationMs' roblox/SUNC.lua
-          grep -q '_G.HarnessXRemotes' roblox/Fuzzer.client.lua
-          test ! -e EXECUTOR_BUILD.md
-          rm -f .github/workflows/apply-audit-runtime.yml
+          python -m unittest discover -s tests -v
+          grep -q 'longBracketEnd' roblox/Plugin.lua
+          grep -q 'prependInstrumentationHeader' roblox/Plugin.lua
+          grep -q 'maxRotationDegrees' roblox/Plugin.lua
+          grep -q 'workflow_dispatch' .github/workflows/ci.yml
+          test ! -e .audit-remediation-trigger
+          rm -f tools/apply_audit_quality.py
+          rmdir tools 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Harden HarnessX runtime and bridge"
+          git commit -m "Harden instrumentation and add CI"
           git push origin HEAD:audit-remediation
