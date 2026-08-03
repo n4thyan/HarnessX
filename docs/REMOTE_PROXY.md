@@ -4,16 +4,16 @@
 
 It does **not** modify Roblox Instance metatables, override engine methods, scan the DataModel, or intercept remotes that the caller did not explicitly wrap.
 
-## Branch safety state
+## Runtime safety
 
-The `global-hooks` branch remains Studio-only. Runtime modules begin with both checks:
+HarnessX remains Studio-only. Runtime modules begin with both checks:
 
 ```lua
 if not game:GetService("RunService"):IsStudio() then return nil end
 if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 ```
 
-`HarnessXEnabled` is therefore an additional opt-in switch inside Studio; it does not bypass the Studio guard.
+`HarnessXEnabled` is an additional opt-in switch inside Studio; it does not bypass the Studio guard.
 
 Enable it before requiring HarnessX runtime modules:
 
@@ -94,15 +94,24 @@ HarnessXIgnore
 
 `RemoteProxy.wrap()` returns the original Instance unchanged.
 
-## AutoProxy status
+## AutoProxy
 
-`AutoProxy.lua` has not yet been added. Its requested specification was cut off after:
+`roblox/AutoProxy.lua` is included in the repository. It scans a selected folder and its descendants, builds a matching Luau table hierarchy, and wraps eligible `RemoteEvent` and `RemoteFunction` leaves through the existing `RemoteProxy` module.
 
 ```lua
-AutoProxy.wrapFolder(folder: Instance): table
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HarnessX = ReplicatedStorage:WaitForChild("HarnessX")
+local AutoProxy = require(HarnessX:WaitForChild("AutoProxy"))
+
+local remotes = AutoProxy.wrapFolder(
+    ReplicatedStorage:WaitForChild("Remotes")
+)
+
+remotes.Purchase:FireServer("Sword", 1)
+local inventory = remotes.Api.GetInventory:InvokeServer()
 ```
 
-The remaining behavior, return-table shape, descendant tracking rules, cleanup API, and handling of future remotes need to be specified before implementation.
+`AutoProxy.wrapFolder()` respects `HarnessXIgnore` on the root, ancestors, and remotes. It calls `RemoteProxy.wrap()`, so repeated wrapping reuses the existing RemoteProxy cache. The hierarchy is a snapshot of remotes present when called; call it again after changing the folder structure.
 
 ## Studio-only execution
 

@@ -13,7 +13,17 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BRIDGE_URL = "http://127.0.0.1:8765"
-local BRIDGE_TOKEN = "change-this-local-token-please"
+local bridgeTokenAttribute = game:GetAttribute("HarnessXBridgeToken")
+
+if typeof(bridgeTokenAttribute) ~= "string" or #bridgeTokenAttribute < 16 then
+	warn(
+		"HarnessX stopped: set the HarnessXBridgeToken game attribute "
+			.. "to the same value as config.json bridge.token."
+	)
+	return nil
+end
+
+local BRIDGE_TOKEN = bridgeTokenAttribute :: string
 local MAX_DEPTH = 6
 local MAX_TABLE_ITEMS = 128
 local MAX_STACK_FRAMES = 64

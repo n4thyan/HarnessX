@@ -1,13 +1,14 @@
 # Current HarnessX baseline
 
-The repository is populated and usable as the initial HarnessX development baseline.
+HarnessX is populated and usable as a Studio-only debugging and testing baseline.
 
 ## Included in the current Studio plugin
 
 - Dockable HarnessX dashboard
-- Live traffic polling
+- Authenticated live-traffic polling
 - Script inspector
 - Source instrumentation through `ScriptEditorService:UpdateSourceAsync()`
+- Configurable `UNC` or `RemoteProxy` rewrite style
 - Undo-aware batch rewrites
 - Observe/mock and performance-profile controls
 - Source backup controls
@@ -16,8 +17,10 @@ The repository is populated and usable as the initial HarnessX development basel
 
 ## Runtime and bridge capabilities
 
-`roblox/Core.lua` and `server/main.py` also provide:
+`roblox/Core.lua`, the proxy modules, and `server/main.py` provide:
 
+- Manual `RemoteProxy` wrappers
+- Folder hierarchy generation through `AutoProxy`
 - Cooperative stack snapshots
 - Server-Sent Events traffic streaming
 - Safe process metrics
@@ -26,8 +29,12 @@ The repository is populated and usable as the initial HarnessX development basel
 - Timestamped source backups
 - Fuzz-session coordination and reporting
 
-The compact plugin currently consumes traffic through authenticated polling. The SSE and stack-dump endpoints remain available for the next dashboard iteration.
+The current compact plugin consumes traffic through authenticated polling. The bridge also retains SSE and stack-dump APIs, but the present plugin does not consume those endpoints.
+
+## Security boundary
+
+All Luau entry points remain guarded by `RunService:IsStudio()` and the `HarnessXEnabled` opt-in attribute. The Flask bridge remains loopback-only and token-authenticated. Process-memory reads and writes are not supported.
 
 ## Validation boundary
 
-Python syntax and encoder tests were run against the generated source before publication. GitHub API reads confirmed the published configuration, Studio guards, Core runtime, Flask bridge, README, and plugin commit. A Roblox Studio playtest is still required for Luau runtime and DockWidget rendering verification.
+Python syntax and encoder tests were run against the generated source before publication. Repository checks confirm the configuration, Studio guards, runtime files, Flask bridge, documentation, and plugin source. A Roblox Studio playtest is still required for Luau runtime behavior and DockWidget rendering verification.

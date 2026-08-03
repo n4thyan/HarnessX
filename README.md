@@ -74,13 +74,21 @@ Enable:
 Game Settings → Security → Allow HTTP Requests
 ```
 
-The same token must appear in:
+Set a local bridge token of at least 16 characters in `config.json`:
 
-```text
-config.json
-roblox/Core.lua
-roblox/Plugin.lua
+```json
+"bridge": {
+  "token": "replace-with-a-long-local-token"
+}
 ```
+
+Then set the same value once as a Studio DataModel attribute, for example from the Command Bar:
+
+```lua
+game:SetAttribute("HarnessXBridgeToken", "replace-with-a-long-local-token")
+```
+
+`Core.lua` and `Plugin.lua` read this shared attribute, so separate token literals are no longer embedded in those files. The authenticated `/v1/config` route cannot supply its own authentication token because a caller already needs the token to access that route.
 
 ## Plugin installation
 
@@ -411,6 +419,10 @@ There is no memory-write route.
 ## Repository
 
 Project repository: `n4thyan/HarnessX`.
+
+## License
+
+HarnessX is licensed under the MIT License. See [`LICENSE`](LICENSE).
 
 ## Studio-only execution
 

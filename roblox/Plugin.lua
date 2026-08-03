@@ -9,7 +9,17 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ScriptEditorService = game:GetService("ScriptEditorService")
 
 local URL = "http://127.0.0.1:8765"
-local TOKEN = "change-this-local-token-please"
+local tokenAttribute = game:GetAttribute("HarnessXBridgeToken")
+
+if typeof(tokenAttribute) ~= "string" or #tokenAttribute < 16 then
+	warn(
+		"HarnessX plugin stopped: set the HarnessXBridgeToken game attribute "
+			.. "to the same value as config.json bridge.token."
+	)
+	return nil
+end
+
+local TOKEN = tokenAttribute :: string
 local HEADER = "-- <HarnessX:instrumented>"
 local IGNORE_ATTRIBUTE = "HarnessXIgnore"
 local enabled = plugin:GetSetting("HarnessXEnabled") ~= false
