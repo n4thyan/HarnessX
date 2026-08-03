@@ -47,13 +47,14 @@
   "plugin": {
     "enabled": true,
     "exclude_scripts_with_attribute": "HarnessXIgnore",
-    "auto_rewrite_on_save": true,
+    "auto_rewrite_on_save": false,
     "wrapper_style": "UNC"
   },
   "fuzzer": {
     "default_rate": 5,
     "max_rate": 100,
-    "default_duration_seconds": 30
+    "default_duration_seconds": 30,
+    "max_history_sessions": 250
   },
   "backup": {
     "output_dir": "./backups",
@@ -62,5 +63,11 @@
   "profiling": {
     "enabled": true,
     "window_seconds": 60
+  },
+  "runtime": {
+    "max_pending_events": 2000,
+    "max_events_per_player_per_second": 200,
+    "max_event_bytes": 65536,
+    "max_batch_retries": 3
   }
 }

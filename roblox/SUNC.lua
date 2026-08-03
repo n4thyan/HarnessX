@@ -241,7 +241,11 @@ function SUNC.InvokeServer(remote: RemoteFunction, ...: any): ...any
 	local arguments = table.pack(...)
 	local identity = remoteIdentity(remote)
 	local sourceLocation = callsite()
-	local startedAt = os.clock()
+	local totalStartedAt = os.clock()
+	local mode = string.lower(
+		tostring(packageFolder:GetAttribute("HarnessXSUNCMode") or "observe")
+	)
+	local preflightDurationMs = 0
 
 	local preflightRecord = {
 		channel = "SUNC",
@@ -254,66 +258,77 @@ function SUNC.InvokeServer(remote: RemoteFunction, ...: any): ...any
 		clientTime = DateTime.now().UnixTimestampMillis,
 	}
 
-	local preflightOk, preflightResponse = pcall(function()
-		return debugFunction:InvokeServer(preflightRecord)
-	end)
+	if mode == "observe" then
+		-- Observe mode must not synchronously round-trip through Core and Flask
+		-- before the target remote. Submit the trace asynchronously instead.
+		submitTrace(preflightRecord)
+	else
+		local preflightStartedAt = os.clock()
+		local preflightOk, preflightResponse = pcall(function()
+			return debugFunction:InvokeServer(preflightRecord)
+		end)
+		preflightDurationMs = math.floor((os.clock() - preflightStartedAt) * 1000)
 
-	if preflightOk and typeof(preflightResponse) == "table" then
-		local mode = string.lower(tostring(preflightResponse.mode or "observe"))
+		if preflightOk and typeof(preflightResponse) == "table" then
+			mode = string.lower(tostring(preflightResponse.mode or mode))
 
-		if mode == "mock" then
-			local mockReturns = preflightResponse.mockReturns
+			if mode == "mock" then
+				local mockReturns = preflightResponse.mockReturns
+				if typeof(mockReturns) ~= "table" then
+					mockReturns = {}
+				end
 
-			if typeof(mockReturns) ~= "table" then
-				mockReturns = {}
+				submitTrace({
+					channel = "SUNC",
+					direction = "server_to_client",
+					phase = "mocked",
+					remote = identity,
+					callsite = sourceLocation,
+					preflightDurationMs = preflightDurationMs,
+					remoteDurationMs = 0,
+					totalDurationMs = math.floor((os.clock() - totalStartedAt) * 1000),
+					returnCount = #mockReturns,
+					returns = serialize(mockReturns),
+					clientTime = DateTime.now().UnixTimestampMillis,
+				})
+
+				return table.unpack(mockReturns, 1, #mockReturns)
+			elseif mode == "fuzz" then
+				local template = preflightResponse.arguments or arguments
+				arguments = SUNC.BuildArguments(template)
+
+				submitTrace({
+					channel = "SUNC",
+					direction = "client_to_server",
+					phase = "fuzz_materialized",
+					remote = identity,
+					callsite = sourceLocation,
+					preflightDurationMs = preflightDurationMs,
+					argumentCount = arguments.n,
+					arguments = serialize(arguments),
+					clientTime = DateTime.now().UnixTimestampMillis,
+				})
 			end
-
+		else
 			submitTrace({
 				channel = "SUNC",
-				direction = "server_to_client",
-				phase = "mocked",
+				direction = "local_bridge",
+				phase = "preflight_failed",
 				remote = identity,
 				callsite = sourceLocation,
-				durationMs = math.floor((os.clock() - startedAt) * 1000),
-				returnCount = #mockReturns,
-				returns = serialize(mockReturns),
-				clientTime = DateTime.now().UnixTimestampMillis,
-			})
-
-			return table.unpack(mockReturns, 1, #mockReturns)
-		elseif mode == "fuzz" then
-			-- A fuzz preflight may provide a replacement argument template.
-			-- If none is supplied, the current arguments are treated as the
-			-- template. Complex descriptors are materialized through UNC.
-			local template = preflightResponse.arguments or arguments
-			arguments = SUNC.BuildArguments(template)
-
-			submitTrace({
-				channel = "SUNC",
-				direction = "client_to_server",
-				phase = "fuzz_materialized",
-				remote = identity,
-				callsite = sourceLocation,
-				argumentCount = arguments.n,
-				arguments = serialize(arguments),
+				preflightDurationMs = preflightDurationMs,
+				error = tostring(preflightResponse),
 				clientTime = DateTime.now().UnixTimestampMillis,
 			})
 		end
-	elseif not preflightOk then
-		submitTrace({
-			channel = "SUNC",
-			direction = "local_bridge",
-			phase = "preflight_failed",
-			remote = identity,
-			callsite = sourceLocation,
-			error = tostring(preflightResponse),
-			clientTime = DateTime.now().UnixTimestampMillis,
-		})
 	end
 
+	local remoteStartedAt = os.clock()
 	local packedCall = table.pack(pcall(function()
 		return remote:InvokeServer(table.unpack(arguments, 1, arguments.n))
 	end))
+	local remoteDurationMs = math.floor((os.clock() - remoteStartedAt) * 1000)
+	local totalDurationMs = math.floor((os.clock() - totalStartedAt) * 1000)
 
 	if packedCall[1] ~= true then
 		local invokeError = tostring(packedCall[2])
@@ -324,7 +339,10 @@ function SUNC.InvokeServer(remote: RemoteFunction, ...: any): ...any
 			phase = "invoke_error",
 			remote = identity,
 			callsite = sourceLocation,
-			durationMs = math.floor((os.clock() - startedAt) * 1000),
+			preflightDurationMs = preflightDurationMs,
+			remoteDurationMs = remoteDurationMs,
+			totalDurationMs = totalDurationMs,
+			durationMs = remoteDurationMs,
 			error = invokeError,
 			clientTime = DateTime.now().UnixTimestampMillis,
 		})
@@ -334,11 +352,9 @@ function SUNC.InvokeServer(remote: RemoteFunction, ...: any): ...any
 
 	local returnCount = packedCall.n - 1
 	local returnValues = table.create(returnCount)
-
 	for index = 1, returnCount do
 		returnValues[index] = packedCall[index + 1]
 	end
-
 	returnValues.n = returnCount
 
 	submitTrace({
@@ -347,7 +363,10 @@ function SUNC.InvokeServer(remote: RemoteFunction, ...: any): ...any
 		phase = "returned",
 		remote = identity,
 		callsite = sourceLocation,
-		durationMs = math.floor((os.clock() - startedAt) * 1000),
+		preflightDurationMs = preflightDurationMs,
+		remoteDurationMs = remoteDurationMs,
+		totalDurationMs = totalDurationMs,
+		durationMs = remoteDurationMs,
 		returnCount = returnCount,
 		returns = serialize(returnValues),
 		clientTime = DateTime.now().UnixTimestampMillis,

@@ -4,7 +4,9 @@ import atexit
 import hmac
 import json
 import logging
+import os
 import re
+import secrets
 import shutil
 import time
 import uuid
@@ -26,6 +28,7 @@ LOOPBACK_HOST = "127.0.0.1"
 TRAFFIC_CAPACITY = 1000
 STREAM_BATCH_LIMIT = 100
 MAX_FUZZ_DURATION_SECONDS = 3600
+DEFAULT_BRIDGE_TOKEN = "change-this-local-token-please"
 
 
 def load_config() -> dict[str, Any]:
@@ -33,12 +36,44 @@ def load_config() -> dict[str, Any]:
         config = json.load(handle)
 
     bridge = config.get("bridge")
+
+    if isinstance(bridge, dict):
+        environment_token = os.environ.get("HARNESSX_BRIDGE_TOKEN")
+        configured_token = bridge.get("token")
+
+        if environment_token:
+            bridge["token"] = environment_token
+        elif configured_token == DEFAULT_BRIDGE_TOKEN:
+            generated_token = secrets.token_urlsafe(32)
+            bridge["token"] = generated_token
+            temporary_path = CONFIG_PATH.with_suffix(".json.tmp")
+
+            try:
+                temporary_path.write_text(
+                    json.dumps(config, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                temporary_path.replace(CONFIG_PATH)
+            except OSError as exc:
+                temporary_path.unlink(missing_ok=True)
+                raise ValueError(
+                    "The default bridge token is forbidden and a random token "
+                    "could not be persisted. Set HARNESSX_BRIDGE_TOKEN or update "
+                    "config.json manually."
+                ) from exc
+
+            print(
+                "HarnessX generated a random bridge token in config.json. "
+                "Set the Studio HarnessXBridgeToken attribute to the same value."
+            )
     profiles = config.get("profiles")
     active_profile = config.get("active_profile")
     plugin_config = config.get("plugin")
     fuzzer_config = config.get("fuzzer")
     backup_config = config.get("backup")
     profiling_config = config.get("profiling")
+    runtime_config_section = config.get("runtime")
 
     if not isinstance(bridge, dict):
         raise ValueError("config.bridge must be an object")
@@ -108,6 +143,21 @@ def load_config() -> dict[str, Any]:
     if not isinstance(profiling_config.get("window_seconds"), int):
         raise ValueError("profiling.window_seconds must be an integer")
 
+    if not isinstance(runtime_config_section, dict):
+        raise ValueError("config.runtime must be an object")
+
+    for field in (
+        "max_pending_events",
+        "max_events_per_player_per_second",
+        "max_event_bytes",
+        "max_batch_retries",
+    ):
+        if not isinstance(runtime_config_section.get(field), int) or runtime_config_section[field] < 1:
+            raise ValueError(f"runtime.{field} must be a positive integer")
+
+    if not isinstance(fuzzer_config.get("max_history_sessions"), int) or fuzzer_config["max_history_sessions"] < 1:
+        raise ValueError("fuzzer.max_history_sessions must be a positive integer")
+
     return config
 
 
@@ -119,6 +169,7 @@ MAX_BODY_BYTES = int(BRIDGE.get("max_body_bytes", 8_388_608))
 FUZZER_CONFIG: dict[str, Any] = CONFIG["fuzzer"]
 BACKUP_CONFIG: dict[str, Any] = CONFIG["backup"]
 PROFILING_CONFIG: dict[str, Any] = CONFIG["profiling"]
+RUNTIME_CONFIG: dict[str, Any] = CONFIG["runtime"]
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
@@ -242,9 +293,33 @@ def authorized() -> bool:
 
 @app.before_request
 def authenticate_v1_routes() -> Response | tuple[Response, int] | None:
-    if request.path.startswith("/v1/") and not authorized():
+    if not request.path.startswith("/v1/"):
+        return None
+
+    if not authorized():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    if request.headers.get("Origin"):
+        return jsonify({"ok": False, "error": "browser_origins_forbidden"}), 403
+
+    if request.method == "OPTIONS":
+        return jsonify({"ok": False, "error": "cors_preflight_not_supported"}), 405
+
     return None
+
+
+@app.after_request
+def enforce_no_cors(response: Response) -> Response:
+    for header in (
+        "Access-Control-Allow-Origin",
+        "Access-Control-Allow-Credentials",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Methods",
+    ):
+        response.headers.pop(header, None)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 def decode_request() -> Any:
@@ -332,7 +407,7 @@ def on_snapshot(snapshot: ProcessSnapshot) -> None:
 scanner: StudioMetricsScanner | None = None
 scanner_config = CONFIG.get("scanner", {})
 
-if scanner_config.get("enabled", True):
+if scanner_config.get("enabled", True) and os.environ.get("HARNESSX_DISABLE_SCANNER") != "1":
     initial_profile = PROFILES[str(CONFIG["active_profile"])]
 
     scanner = StudioMetricsScanner(
@@ -389,6 +464,22 @@ def refresh_fuzz_session(session: dict[str, Any]) -> None:
         if isinstance(expires_at, (int, float)) and now >= float(expires_at):
             session["status"] = "expired"
             session["finishedAt"] = now
+
+
+def prune_fuzz_sessions_locked() -> None:
+    max_history = max(int(FUZZER_CONFIG.get("max_history_sessions", 250)), 1)
+    terminal = [
+        session
+        for session in fuzz_sessions.values()
+        if session.get("status") not in {"queued", "running"}
+    ]
+    terminal.sort(
+        key=lambda session: float(session.get("finishedAt") or session.get("createdAt") or 0.0),
+        reverse=True,
+    )
+
+    for session in terminal[max_history:]:
+        fuzz_sessions.pop(str(session["id"]), None)
 
 
 def public_fuzz_session(session: dict[str, Any]) -> dict[str, Any]:
@@ -479,6 +570,7 @@ def public_config() -> Response:
             "fuzzer": FUZZER_CONFIG,
             "backup": BACKUP_CONFIG,
             "profiling": PROFILING_CONFIG,
+            "runtime": RUNTIME_CONFIG,
         }
     )
 
@@ -541,6 +633,9 @@ def update_config() -> Response | tuple[Response, int]:
 
             runtime_config.active_profile = profile_name
             changes["active_profile"] = profile_name
+
+    if "active_profile" in changes and scanner is not None:
+        scanner.set_interval_ms(int(PROFILES[changes["active_profile"]]["scan_interval_ms"]))
 
     profile_name, profile, mode, mock_returns = current_runtime()
 
@@ -936,11 +1031,25 @@ def backup_sources() -> Response | tuple[Response, int]:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "JSON object required"}), 400
 
-    sources = body.get("sources", body)
-    if not isinstance(sources, dict):
-        return jsonify({"ok": False, "error": "sources mapping required"}), 400
+    supplied_sources = body.get("sources", body)
+    entries: list[dict[str, Any]] = []
 
-    if len(sources) > 5000:
+    if isinstance(supplied_sources, dict):
+        for legacy_path, source in supplied_sources.items():
+            entries.append(
+                {
+                    "path": legacy_path,
+                    "segments": str(legacy_path).split("."),
+                    "className": None,
+                    "source": source,
+                }
+            )
+    elif isinstance(supplied_sources, list):
+        entries = supplied_sources
+    else:
+        return jsonify({"ok": False, "error": "sources array or mapping required"}), 400
+
+    if len(entries) > 5000:
         return jsonify({"ok": False, "error": "too many source files"}), 400
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -955,31 +1064,59 @@ def backup_sources() -> Response | tuple[Response, int]:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     written: list[str] = []
+    manifest_entries: list[dict[str, Any]] = []
+    used_paths: set[str] = set()
 
     try:
-        for script_path, source in sources.items():
-            if not isinstance(script_path, str) or not isinstance(source, str):
-                raise ValueError("Every backup entry must map a string path to source text")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("Every backup entry must be an object")
 
-            parts = [
-                safe_backup_segment(part)
-                for part in script_path.split(".")
-                if part.strip()
-            ]
+            source = entry.get("source")
+            segments = entry.get("segments")
+            original_path = entry.get("path")
+            class_name = entry.get("className")
 
+            if not isinstance(source, str):
+                raise ValueError("Every backup entry must include string source")
+
+            if not isinstance(segments, list) or not all(isinstance(part, str) for part in segments):
+                raise ValueError("Every backup entry must include string segments")
+
+            parts = [safe_backup_segment(part) for part in segments if part.strip()]
             if not parts:
                 parts = ["unnamed"]
 
-            relative = Path(*parts).with_suffix(".lua")
+            parent = Path(*parts[:-1]) if len(parts) > 1 else Path()
+            stem = parts[-1]
+            relative = parent / f"{stem}.lua"
+            collision_index = 2
+
+            while relative.as_posix().casefold() in used_paths:
+                relative = parent / f"{stem}__{collision_index}.lua"
+                collision_index += 1
+
+            used_paths.add(relative.as_posix().casefold())
             output = destination / relative
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(source, encoding="utf-8", newline="\n")
-            written.append(str(relative).replace("\\", "/"))
+
+            written_path = relative.as_posix()
+            written.append(written_path)
+            manifest_entries.append(
+                {
+                    "path": original_path,
+                    "segments": segments,
+                    "className": class_name,
+                    "file": written_path,
+                }
+            )
 
         manifest = {
             "createdAt": timestamp,
             "sourceCount": len(written),
             "files": written,
+            "entries": manifest_entries,
         }
         (destination / "manifest.json").write_text(
             json.dumps(manifest, indent=2),
@@ -1118,6 +1255,7 @@ def fuzz_start() -> Response | tuple[Response, int]:
     }
 
     with fuzz_lock:
+        prune_fuzz_sessions_locked()
         fuzz_sessions[session_id] = session
 
     public = public_fuzz_session(session)
