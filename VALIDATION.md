@@ -21,7 +21,6 @@ Not performed in this environment:
 - Live playtest client/server fuzz run
 - DockWidget rendering verification
 
-
 Automated on every push and pull request:
 - Python syntax compilation
 - Encoder round trips
@@ -30,3 +29,4 @@ Automated on every push and pull request:
 - Disabled memory endpoint check
 - Studio guard and configuration contract checks
 - Current-tree scan for unsupported process-memory and engine-hook APIs
+- Source-rewriter guards for RemoteProxy recursion, long strings/comments, directive placement, and Luau-compatible trace patterns
