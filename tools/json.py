@@ -45,6 +45,20 @@ def finalize_quality_generation() -> None:
         [sys.executable, "-m", "pip", "install", "-r", str(ROOT / "requirements.lock")]
     )
 
+    # GitHub Actions' GITHUB_TOKEN cannot add workflow files. Keep ci.yml long
+    # enough for validation, then remove it from this bot-authored commit. The
+    # connector adds the same validated workflow in a separate commit.
+    hook = ROOT / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "git reset HEAD -- .github/workflows/ci.yml >/dev/null 2>&1 || true\n"
+        "rm -f .github/workflows/ci.yml\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    hook.chmod(0o755)
+
     for marker in (
         ROOT / ".audit-quality-retry",
         ROOT / ".audit-quality-retry-2",
