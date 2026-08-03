@@ -35,7 +35,12 @@ class RepositoryContractTests(unittest.TestCase):
             "flask_cors",
             "CORS(app",
         )
-        for path in list((ROOT / "server").glob("*.py")) + list((ROOT / "roblox").glob("*.lua")):
+        paths = (
+            list((ROOT / "server").glob("*.py"))
+            + list((ROOT / "roblox").glob("*.lua"))
+            + list((ROOT / "tools").glob("*.py"))
+        )
+        for path in paths:
             source = path.read_text(encoding="utf-8")
             for term in forbidden:
                 self.assertNotIn(term, source, f"{term} in {path}")
@@ -69,6 +74,28 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("alreadyProxy", source)
         self.assertIn("traceInstrumentedCalls", source)
         self.assertNotIn("FireServer|InvokeServer", source)
+
+    def test_provenance_pipeline_is_present_and_honest(self) -> None:
+        required = (
+            ROOT / "tools" / "build_plugin.py",
+            ROOT / "tools" / "verify_build.py",
+            ROOT / "tests" / "test_provenance.py",
+            ROOT / "PROVENANCE.md",
+            ROOT / ".github" / "workflows" / "release.yml",
+        )
+        for path in required:
+            self.assertTrue(path.is_file(), path)
+
+        builder = required[0].read_text(encoding="utf-8")
+        release_workflow = required[-1].read_text(encoding="utf-8")
+        documentation = (ROOT / "PROVENANCE.md").read_text(encoding="utf-8").lower()
+
+        self.assertIn("This banner is metadata, not cryptographic proof.", builder)
+        self.assertIn('"bannerIsProof": False', builder)
+        self.assertIn("actions/attest@v4", release_workflow)
+        self.assertIn("attestations: write", release_workflow)
+        self.assertIn("does not prevent copying", documentation)
+        self.assertIn("gh attestation verify", documentation)
 
 
 if __name__ == "__main__":
