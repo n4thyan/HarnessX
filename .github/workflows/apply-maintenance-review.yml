@@ -19,7 +19,7 @@ jobs:
         with:
           ref: main
 
-      - name: Apply documentation and configuration fixes
+      - name: Apply maintenance fixes
         shell: bash
         run: |
           python - <<'PY'
@@ -39,17 +39,11 @@ jobs:
                   raise SystemExit(f"{label}: expected one match, found {count}")
               return updated
 
-          # Remove duplicated Luau token literals. The Flask bridge still reads
-          # the authoritative token from config.json. Studio code reads one
-          # shared DataModel attribute instead of embedding two extra copies.
           core_path = Path("roblox/Core.lua")
           core = core_path.read_text(encoding="utf-8")
           core = replace_once(
               core,
-              '''local BRIDGE_URL = "http://127.0.0.1:8765"
-          local BRIDGE_TOKEN = "change-this-local-token-please"
-          local MAX_DEPTH = 6
-          ''',
+              'local BRIDGE_URL = "http://127.0.0.1:8765"\nlocal BRIDGE_TOKEN = "change-this-local-token-please"\nlocal MAX_DEPTH = 6\n',
               '''local BRIDGE_URL = "http://127.0.0.1:8765"
           local bridgeTokenAttribute = game:GetAttribute("HarnessXBridgeToken")
 
@@ -72,10 +66,7 @@ jobs:
           plugin = plugin_path.read_text(encoding="utf-8")
           plugin = replace_once(
               plugin,
-              '''local URL = "http://127.0.0.1:8765"
-          local TOKEN = "change-this-local-token-please"
-          local HEADER = "-- <HarnessX:instrumented>"
-          ''',
+              'local URL = "http://127.0.0.1:8765"\nlocal TOKEN = "change-this-local-token-please"\nlocal HEADER = "-- <HarnessX:instrumented>"\n',
               '''local URL = "http://127.0.0.1:8765"
           local tokenAttribute = game:GetAttribute("HarnessXBridgeToken")
 
@@ -96,63 +87,6 @@ jobs:
 
           readme_path = Path("README.md")
           readme = readme_path.read_text(encoding="utf-8")
-          readme = regex_replace_once(
-              readme,
-              r'''Security boundary \(global-hooks branch\)\n-+\n.*?\n## Required Studio layout''',
-              '''## Security boundary
-
-          HarnessX remains Studio-only. `HarnessXEnabled` is an additional opt-in gate inside Studio and does not bypass `RunService:IsStudio()`.
-
-          Every runtime Luau entry point starts with:
-
-          ```lua
-          if not game:GetService("RunService"):IsStudio() then return nil end
-          if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
-          ```
-
-          HarnessX uses supported Roblox APIs, keeps the Flask bridge bound to `127.0.0.1`, requires `X-Debug-Token` authentication for `/v1/*`, and does not expose process-memory access.
-
-          ## Repository layout
-
-          ```text
-          config.json
-          roblox/Core.lua
-          roblox/Encoder.lua
-          roblox/UNC.lua
-          roblox/SUNC.lua
-          roblox/RemoteProxy.lua
-          roblox/AutoProxy.lua
-          roblox/Fuzzer.lua
-          roblox/Fuzzer.client.lua
-          roblox/Plugin.lua
-          server/encoder.py
-          server/scanner.py
-          server/main.py
-          docs/REMOTE_PROXY.md
-          CURRENT_STATUS.md
-          LICENSE
-          README.md
-          ```
-
-          ## Required Studio layout''',
-              "README security section",
-          )
-
-          readme = replace_once(
-              readme,
-              '''    ├── UNC            ModuleScript
-              ├── SUNC            ModuleScript
-              └── Fuzzer         ModuleScript
-          ''',
-              '''    ├── UNC            ModuleScript
-              ├── SUNC           ModuleScript
-              ├── RemoteProxy    ModuleScript
-              ├── AutoProxy      ModuleScript
-              └── Fuzzer         ModuleScript
-          ''',
-              "README Studio layout",
-          )
-
           readme = replace_once(
               readme,
               '''The same token must appear in:
@@ -177,21 +111,24 @@ jobs:
           game:SetAttribute("HarnessXBridgeToken", "replace-with-a-long-local-token")
           ```
 
-          `Core.lua` and `Plugin.lua` read this shared attribute. They no longer embed separate token literals. The authenticated `/v1/config` route cannot securely supply its own authentication token because the caller would already need that token to access the route.
+          `Core.lua` and `Plugin.lua` read this shared attribute, so separate token literals are no longer embedded in those files. The authenticated `/v1/config` route cannot supply its own authentication token because a caller already needs the token to access that route.
           ''',
               "README token instructions",
           )
 
           if "## License\n" not in readme:
               marker = "\n## Studio-only execution\n"
-              license_section = '''
+              if marker not in readme:
+                  raise SystemExit("README Studio-only marker missing")
+              readme = readme.replace(
+                  marker,
+                  '''
           ## License
 
           HarnessX is licensed under the MIT License. See [`LICENSE`](LICENSE).
-          '''
-              if marker not in readme:
-                  raise SystemExit("README license insertion marker missing")
-              readme = readme.replace(marker, license_section + marker, 1)
+          ''' + marker,
+                  1,
+              )
 
           readme_path.write_text(readme, encoding="utf-8", newline="\n")
 
@@ -199,7 +136,7 @@ jobs:
           remote_doc = remote_doc_path.read_text(encoding="utf-8")
           remote_doc = regex_replace_once(
               remote_doc,
-              r'''## Branch safety state\n\n.*?\n## Installation''',
+              r'## Branch safety state\n\n.*?\n## Installation',
               '''## Runtime safety
 
           HarnessX remains Studio-only. Runtime modules begin with both checks:
@@ -220,10 +157,9 @@ jobs:
           ## Installation''',
               "RemoteProxy safety section",
           )
-
           remote_doc = regex_replace_once(
               remote_doc,
-              r'''## AutoProxy status\n\n.*?\n## Studio-only execution''',
+              r'## AutoProxy status\n\n.*?\n## Studio-only execution',
               '''## AutoProxy
 
           `roblox/AutoProxy.lua` is included in the repository. It scans a selected folder and its descendants, builds a matching Luau table hierarchy, and wraps eligible `RemoteEvent` and `RemoteFunction` leaves through the existing `RemoteProxy` module.
@@ -241,14 +177,14 @@ jobs:
           local inventory = remotes.Api.GetInventory:InvokeServer()
           ```
 
-          `AutoProxy.wrapFolder()` respects `HarnessXIgnore` on the root, ancestors, and remotes. It uses `RemoteProxy.wrap()`, so repeated wrapping reuses the same RemoteProxy cache. The returned hierarchy is a snapshot of remotes present when the function is called; call it again after changing the folder structure.
+          `AutoProxy.wrapFolder()` respects `HarnessXIgnore` on the root, ancestors, and remotes. It calls `RemoteProxy.wrap()`, so repeated wrapping reuses the existing RemoteProxy cache. The hierarchy is a snapshot of remotes present when called; call it again after changing the folder structure.
 
           ## Studio-only execution''',
               "RemoteProxy AutoProxy section",
           )
           remote_doc_path.write_text(remote_doc, encoding="utf-8", newline="\n")
 
-          status = '''# Current HarnessX baseline
+          status = """# Current HarnessX baseline
 
           HarnessX is populated and usable as a Studio-only debugging and testing baseline.
 
@@ -288,14 +224,17 @@ jobs:
           ## Validation boundary
 
           Python syntax and encoder tests were run against the generated source before publication. Repository checks confirm the configuration, Studio guards, runtime files, Flask bridge, documentation, and plugin source. A Roblox Studio playtest is still required for Luau runtime behavior and DockWidget rendering verification.
-          '''
+          """
           Path("CURRENT_STATUS.md").write_text(
               "\n".join(line[10:] if line.startswith("          ") else line for line in status.splitlines()) + "\n",
               encoding="utf-8",
               newline="\n",
           )
 
-          license_text = '''MIT License
+          def dedent_block(value: str) -> str:
+              return "\n".join(line[10:] if line.startswith("          ") else line for line in value.splitlines()) + "\n"
+
+          Path("LICENSE").write_text(dedent_block("""MIT License
 
           Copyright (c) 2026 n4thyan
 
@@ -316,17 +255,11 @@ jobs:
           LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
           OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
           SOFTWARE.
-          '''
-          Path("LICENSE").write_text(
-              "\n".join(line[10:] if line.startswith("          ") else line for line in license_text.splitlines()) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
+          """), encoding="utf-8", newline="\n")
 
           issue_dir = Path(".github/ISSUE_TEMPLATE")
           issue_dir.mkdir(parents=True, exist_ok=True)
-
-          bug = '''---
+          (issue_dir / "bug_report.md").write_text(dedent_block("""---
           name: Bug report
           about: Report a reproducible HarnessX problem
           title: "[Bug] "
@@ -362,7 +295,7 @@ jobs:
 
           ## Logs or screenshots
 
-          Remove tokens and other private values before posting logs.
+          Remove tokens and private values before posting logs.
 
           ## Checklist
 
@@ -370,14 +303,9 @@ jobs:
           - [ ] `HarnessXEnabled` is set to `true`.
           - [ ] `HarnessXBridgeToken` matches `config.json`.
           - [ ] I checked for `HarnessXIgnore` on the relevant instances.
-          '''
-          (issue_dir / "bug_report.md").write_text(
-              "\n".join(line[10:] if line.startswith("          ") else line for line in bug.splitlines()) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
+          """), encoding="utf-8", newline="\n")
 
-          feature = '''---
+          (issue_dir / "feature_request.md").write_text(dedent_block("""---
           name: Feature request
           about: Suggest a supported Studio debugging improvement
           title: "[Feature] "
@@ -400,14 +328,9 @@ jobs:
           ## Safety boundary
 
           Confirm that the proposal uses supported Roblox Studio APIs and does not require executor APIs, engine metamethod hooks, process-memory access, or live-client exploitation techniques.
-          '''
-          (issue_dir / "feature_request.md").write_text(
-              "\n".join(line[10:] if line.startswith("          ") else line for line in feature.splitlines()) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
+          """), encoding="utf-8", newline="\n")
 
-          pr_template = '''## Summary
+          Path(".github/PULL_REQUEST_TEMPLATE.md").write_text(dedent_block("""## Summary
 
           Describe the change and why it is needed.
 
@@ -428,20 +351,13 @@ jobs:
 
           - [ ] README or focused documentation was updated.
           - [ ] Tokens, private paths, and personal information were removed from logs and screenshots.
-          '''
-          Path(".github/PULL_REQUEST_TEMPLATE.md").write_text(
-              "\n".join(line[10:] if line.startswith("          ") else line for line in pr_template.splitlines()) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
+          """), encoding="utf-8", newline="\n")
 
-          # Structural validation.
           json.loads(Path("config.json").read_text(encoding="utf-8"))
           assert 'change-this-local-token-please' not in core
           assert 'change-this-local-token-please' not in plugin
           assert 'game:GetAttribute("HarnessXBridgeToken")' in core
           assert 'game:GetAttribute("HarnessXBridgeToken")' in plugin
-          assert 'roblox/AutoProxy.lua' in readme
           assert '`roblox/AutoProxy.lua` is included' in remote_doc
           assert 'present plugin does not consume those endpoints' in Path("CURRENT_STATUS.md").read_text(encoding="utf-8")
           assert Path("LICENSE").is_file()
