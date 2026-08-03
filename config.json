@@ -47,7 +47,8 @@
   "plugin": {
     "enabled": true,
     "exclude_scripts_with_attribute": "HarnessXIgnore",
-    "auto_rewrite_on_save": true
+    "auto_rewrite_on_save": true,
+    "wrapper_style": "UNC"
   },
   "fuzzer": {
     "default_rate": 5,
