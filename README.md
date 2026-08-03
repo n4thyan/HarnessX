@@ -56,10 +56,10 @@ The separate LocalScript is necessary because Roblox defines `RemoteEvent:FireSe
 
 ## Start the bridge
 
-Install Python dependencies:
+HarnessX requires Python 3.10 or newer. Install the pinned direct dependencies:
 
 ```bat
-pip install flask psutil
+pip install -r requirements.lock
 ```
 
 Start the server from the project root:
@@ -74,21 +74,18 @@ Enable:
 Game Settings → Security → Allow HTTP Requests
 ```
 
-Set a local bridge token of at least 16 characters in `config.json`:
+On first start, the bridge replaces the committed placeholder token with a random token and writes it to `config.json`. You can instead supply `HARNESSX_BRIDGE_TOKEN` as an environment variable. The bridge refuses to continue with an invalid token.
 
-```json
-"bridge": {
-  "token": "replace-with-a-long-local-token"
-}
-```
-
-Then set the same value once as a Studio DataModel attribute, for example from the Command Bar:
+Set the same token in Studio from the Command Bar before loading Core or the plugin:
 
 ```lua
-game:SetAttribute("HarnessXBridgeToken", "replace-with-a-long-local-token")
+game:SetAttribute("HarnessXEnabled", true)
+game:SetAttribute("HarnessXBridgeToken", "copy-the-token-from-config-json")
 ```
 
-`Core.lua` and `Plugin.lua` read this shared attribute, so separate token literals are no longer embedded in those files. The authenticated `/v1/config` route cannot supply its own authentication token because a caller already needs the token to access that route.
+`HarnessXEnabled` is an additional Studio opt-in and never bypasses `RunService:IsStudio()`. The token protects the loopback HTTP service from unrelated local processes, but code already executing inside the same Studio DataModel can read attributes and use HarnessX transport remotes. Do not run untrusted place code while HarnessX is enabled.
+
+The bridge intentionally rejects browser-origin requests and does not emit permissive CORS headers. Do not add `flask-cors` or wildcard origins for convenience.
 
 ## Plugin installation
 
@@ -118,9 +115,7 @@ The Fuzzer tab scans the DataModel for eligible `RemoteEvent` and `RemoteFunctio
 
 ### Select a remote
 
-Open the target selector and choose a remote. The plugin performs a heuristic source scan to estimate its argument count. Direct method calls and rewritten `UNC.FireServer()` / `SUNC.InvokeServer()` calls are both considered.
-
-Argument detection cannot resolve every dynamically generated remote reference. The schema editor remains authoritative.
+Open the target selector and choose a remote, then define the argument schema explicitly. HarnessX does not infer a reliable remote contract from source code; the schema editor is authoritative.
 
 ### Schema format
 
@@ -431,3 +426,12 @@ HarnessX remains Studio-only.
 The `HarnessXEnabled` attribute is an additional opt-in gate inside Studio. It does not bypass `RunService:IsStudio()`.
 
 Running HarnessX in a published live client is not supported out of the box. To run it in a live client, you would need to maintain a separate unsupported fork with the Studio guards manually removed from the Luau files. This configuration is not tested, recommended, or supported by the HarnessX project. ;-)
+
+
+## Runtime resilience
+
+The Core traffic queue is bounded. When the configured limit is reached, the oldest queued record is dropped and the dropped-record count is reported in runtime status. Failed bridge batches are retried with bounded exponential backoff; they are discarded after the configured retry cap.
+
+SUNC profiling reports `remoteDurationMs`, `preflightDurationMs`, and `totalDurationMs`. The compatibility field `durationMs` now represents only the target RemoteFunction call. Observe mode no longer blocks the game call on the localhost preflight. Mock and fuzz modes retain synchronous preflight because they may change behavior.
+
+The AutoProxy quick-start table is created in `Fuzzer.client.lua`, where client-to-server remote methods are valid. It is available as `_G.HarnessXRemotes` in that client Luau VM when `ReplicatedStorage.Remotes` exists.
