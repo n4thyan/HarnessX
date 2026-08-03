@@ -47,6 +47,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("prependInstrumentationHeader", source)
         self.assertIn("alreadyProxy", source)
         self.assertIn("traceInstrumentedCalls", source)
+        self.assertNotIn("FireServer|InvokeServer", source)
 
 
 if __name__ == "__main__":

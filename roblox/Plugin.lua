@@ -414,7 +414,9 @@ local function traceInstrumentedCalls(source: string): string
 		local wrapFinish = if wrapOpen ~= nil then matchingParen(mask, wrapOpen) else nil
 		if wrapFinish == nil then break end
 		local tail = mask:sub(wrapFinish + 1)
-		local _, tailEnd = tail:find("^%s*:%s*(FireServer|InvokeServer)%s*%(")
+		local _, fireEnd = tail:find("^%s*:%s*FireServer%s*%(")
+		local _, invokeEnd = tail:find("^%s*:%s*InvokeServer%s*%(")
+		local tailEnd = fireEnd or invokeEnd
 		if tailEnd ~= nil then
 			local callOpen = mask:find("(", wrapFinish + 1, true)
 			local callFinish = if callOpen ~= nil then matchingParen(mask, callOpen) else nil
