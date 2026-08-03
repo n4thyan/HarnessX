@@ -2,17 +2,16 @@
 
 A Studio-only Roblox network debugging, automated testing, fuzzing, source-instrumentation, and performance-profiling toolkit. HarnessX uses supported Roblox APIs, a loopback-only Python bridge, and an explicit `RunService:IsStudio()` lock.
 
-Security boundary (global-hooks branch)
----------------------------------------
-
-This branch introduces an advanced opt‑in toggle for developers who want to run
-HarnessX outside the Studio sandbox.
+## Security boundary
 
 Every runtime Luau file starts with:
 
 ```lua
 if not game:GetService("RunService"):IsStudio() then return nil end
 if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
+```
+
+`HarnessXEnabled` is an additional opt-in switch inside Studio. It does not bypass the Studio guard.
 
 ```text
 config.json
@@ -20,6 +19,8 @@ roblox/Core.lua
 roblox/Encoder.lua
 roblox/UNC.lua
 roblox/SUNC.lua
+roblox/RemoteProxy.lua
+roblox/AutoProxy.lua
 roblox/Fuzzer.lua
 roblox/Fuzzer.client.lua
 roblox/Plugin.lua
@@ -36,7 +37,9 @@ ReplicatedStorage
 └── HarnessX
     ├── Encoder        ModuleScript
     ├── UNC            ModuleScript
-    ├── SUNC            ModuleScript
+    ├── SUNC           ModuleScript
+    ├── RemoteProxy    ModuleScript
+    ├── AutoProxy      ModuleScript
     └── Fuzzer         ModuleScript
 
 ServerScriptService
@@ -88,6 +91,18 @@ roblox/Plugin.lua
 5. Restart or reload the plugin after replacing its source.
 
 The plugin retains the previous dashboard tabs and adds **Fuzzer**.
+
+## Wrapper style
+
+The plugin supports two source-rewrite styles through `config.json`:
+
+```json
+"plugin": {
+  "wrapper_style": "UNC"
+}
+```
+
+Use `"UNC"` to rewrite calls through `UNC.FireServer()` and `SUNC.InvokeServer()`. Use `"RemoteProxy"` to rewrite calls through the manual `RemoteProxy.wrap()` table wrapper.
 
 ## Fuzzer tab
 
@@ -393,7 +408,14 @@ It always returns HTTP 403.
 
 There is no memory-write route.
 
-
 ## Repository
 
 Project repository: `n4thyan/HarnessX`.
+
+## Studio-only execution
+
+HarnessX remains Studio-only.
+
+The `HarnessXEnabled` attribute is an additional opt-in gate inside Studio. It does not bypass `RunService:IsStudio()`.
+
+Running HarnessX in a published live client is not supported out of the box. To run it in a live client, you would need to maintain a separate unsupported fork with the Studio guards manually removed from the Luau files. This configuration is not tested, recommended, or supported by the HarnessX project.
