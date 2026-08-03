@@ -2,25 +2,17 @@
 
 A Studio-only Roblox network debugging, automated testing, fuzzing, source-instrumentation, and performance-profiling toolkit. HarnessX uses supported Roblox APIs, a loopback-only Python bridge, and an explicit `RunService:IsStudio()` lock.
 
-## Security boundary
+Security boundary (global-hooks branch)
+---------------------------------------
+
+This branch introduces an advanced opt‑in toggle for developers who want to run
+HarnessX outside the Studio sandbox.
 
 Every runtime Luau file starts with:
 
 ```lua
 if not game:GetService("RunService"):IsStudio() then return nil end
-```
-
-The bridge:
-
-- Binds only to `127.0.0.1`.
-- Requires `X-Debug-Token` on every `/v1/*` route.
-- Keeps `/v1/memory/read` disabled with HTTP 403.
-- Has no process-memory write endpoint.
-- Uses supported source wrappers instead of overriding Roblox engine methods.
-
-Run fuzzing only in a disposable test place or a clean local copy. Even in Studio, randomized remote calls can intentionally trigger game logic, modify test data, spawn objects, or invoke expensive code.
-
-## Included files
+if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 
 ```text
 config.json
