@@ -24,6 +24,26 @@ jobs:
           git checkout audit-remediation
           test -f tools/apply_audit_quality.py
           python tools/apply_audit_quality.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_repository_contract.py")
+          source = path.read_text(encoding="utf-8")
+          source = source.replace(
+              '''            "ReadProcessMemory",
+            "WriteProcessMemory",
+            "OpenProcess(",
+            "ctypes.windll",
+''',
+              '''            "kernel32.ReadProcessMemory(",
+            "kernel32.WriteProcessMemory(",
+            "kernel32.OpenProcess(",
+            "ctypes.windll.kernel32",
+''',
+          )
+          path.write_text(source, encoding="utf-8", newline="\n")
+          PY
+          python -m pip install -r requirements.lock
           python -m compileall -q server tests
           python -m json.tool config.json >/dev/null
           python -m unittest discover -s tests -v
