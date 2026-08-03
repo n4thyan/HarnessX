@@ -1,4 +1,5 @@
 if not game:GetService("RunService"):IsStudio() then return nil end
+if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 
 --[[
 	Studio-only RemoteFunction source wrapper.
