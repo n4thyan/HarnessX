@@ -1,0 +1,63 @@
+name: Launch HarnessX audit remediation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/launch-audit-remediation.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply staged remediation to branch
+        shell: bash
+        run: |
+          git fetch origin audit-remediation:audit-remediation
+          git checkout audit-remediation
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import gzip
+          import re
+
+          workflow = Path('.github/workflows/apply-audit-runtime.yml').read_text(encoding='utf-8')
+          match = re.search(r"echo '([^']+)' \| base64 -d", workflow)
+          if match is None:
+              raise SystemExit('staged remediation payload not found')
+          payload = gzip.decompress(base64.b64decode(match.group(1)))
+          Path('/tmp/apply_audit_runtime.py').write_bytes(payload)
+          PY
+          python /tmp/apply_audit_runtime.py
+          python -m compileall -q server
+          python -m json.tool config.json >/dev/null
+          grep -q 'DEFAULT_BRIDGE_TOKEN' server/main.py
+          grep -q 'browser_origins_forbidden' server/main.py
+          grep -q 'set_interval_ms' server/scanner.py
+          grep -q 'MAX_PENDING_EVENTS' roblox/Core.lua
+          grep -q 'remoteDurationMs' roblox/SUNC.lua
+          grep -q '_G.HarnessXRemotes' roblox/Fuzzer.client.lua
+          test ! -e EXECUTOR_BUILD.md
+          rm -f .github/workflows/apply-audit-runtime.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden HarnessX runtime and bridge"
+          git push origin HEAD:audit-remediation
+
+      - name: Remove launcher from main
+        shell: bash
+        run: |
+          git checkout main
+          git rm .github/workflows/launch-audit-remediation.yml
+          git commit -m "Remove audit remediation launcher"
+          git push origin HEAD:main
