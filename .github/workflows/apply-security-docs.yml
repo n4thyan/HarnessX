@@ -1,0 +1,66 @@
+name: Apply security documentation
+
+on:
+  push:
+    branches:
+      - security-boundaries-doc
+    paths:
+      - ".tmp/security-boundaries/**"
+      - ".github/workflows/apply-security-docs.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: security-boundaries-doc
+          fetch-depth: 0
+
+      - name: Materialize rewritten document
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import gzip
+          import hashlib
+
+          encoded_path = Path('.tmp/security-boundaries/document.md.gz.b64')
+          output_path = Path('SECURITY_BOUNDARIES.md')
+          expected = '5714b0c3905ca66c363ebfb421e010016678ad899c4b6aa6c0545dbe724f146a'
+
+          raw = gzip.decompress(base64.b64decode(encoded_path.read_text(encoding='utf-8')))
+          actual = hashlib.sha256(raw).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'SHA-256 mismatch: {actual}')
+
+          output_path.write_bytes(raw)
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          link = 'Detailed guardrails and trust classifications are documented in [`SECURITY_BOUNDARIES.md`](SECURITY_BOUNDARIES.md).'
+          if link not in readme:
+              marker = '`HarnessXEnabled` is an additional opt-in switch inside Studio. It does not bypass the Studio guard.\n'
+              if marker not in readme:
+                  raise SystemExit('README insertion marker not found')
+              readme = readme.replace(marker, marker + '\n' + link + '\n', 1)
+              readme_path.write_text(readme, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Remove staging files
+        run: |
+          rm -rf .tmp/security-boundaries
+          rm -f .github/workflows/apply-security-docs.yml
+
+      - name: Commit documentation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add security boundaries and guardrail reference"
+          git push origin HEAD:security-boundaries-doc
