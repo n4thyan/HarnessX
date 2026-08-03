@@ -1,0 +1,495 @@
+if not game:GetService("RunService"):IsStudio() then return nil end
+
+assert(plugin, "Plugin.lua must run as a Roblox Studio plugin")
+
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ScriptEditorService = game:GetService("ScriptEditorService")
+
+local URL = "http://127.0.0.1:8765"
+local TOKEN = "change-this-local-token-please"
+local HEADER = "-- <HarnessX:instrumented>"
+local IGNORE_ATTRIBUTE = "HarnessXIgnore"
+local enabled = plugin:GetSetting("HarnessXEnabled") ~= false
+
+local function request(path: string, method: string, body: any?): (boolean, any)
+	local options: {[string]: any} = {
+		Url = URL .. path,
+		Method = method,
+		Headers = {
+			["Accept"] = "application/json",
+			["Content-Type"] = "application/json",
+			["X-Debug-Token"] = TOKEN,
+		},
+	}
+	if body ~= nil then options.Body = HttpService:JSONEncode(body) end
+	local ok, response = pcall(function() return HttpService:RequestAsync(options) end)
+	if not ok then return false, tostring(response) end
+	if not response.Success then
+		return false, string.format("HTTP %s: %s", response.StatusCode, response.Body)
+	end
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(response.Body)
+	end)
+	if not decodedOk then return false, "Invalid JSON response" end
+	return true, decoded
+end
+
+local configOk, bridgeConfig = request("/v1/config", "GET", nil)
+if not configOk or typeof(bridgeConfig) ~= "table" then bridgeConfig = {} end
+local pluginConfig = if typeof(bridgeConfig.plugin) == "table" then bridgeConfig.plugin else {}
+local fuzzerConfig = if typeof(bridgeConfig.fuzzer) == "table" then bridgeConfig.fuzzer else {}
+local excludeAttribute = tostring(pluginConfig.exclude_scripts_with_attribute or IGNORE_ATTRIBUTE)
+
+local function isScript(instance: Instance): boolean
+	return instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript")
+end
+
+local function excluded(instance: Instance): boolean
+	local current: Instance? = instance
+	while current do
+		if current:GetAttribute(excludeAttribute) == true then return true end
+		current = current.Parent
+	end
+	local folder = ReplicatedStorage:FindFirstChild("HarnessX")
+	return folder ~= nil and instance:IsDescendantOf(folder)
+end
+
+local function scripts(): {Instance}
+	local result = {}
+	for _, instance in game:GetDescendants() do
+		if isScript(instance) and not excluded(instance) then table.insert(result, instance) end
+	end
+	table.sort(result, function(a, b) return a:GetFullName() < b:GetFullName() end)
+	return result
+end
+
+local function skipString(source: string, index: number): number
+	local quote = source:sub(index, index)
+	local cursor = index + 1
+	while cursor <= #source do
+		local character = source:sub(cursor, cursor)
+		if character == "\\" then cursor += 2
+		elseif character == quote then return cursor + 1
+		else cursor += 1 end
+	end
+	return #source + 1
+end
+
+local function codeMask(source: string): string
+	local output = table.create(#source)
+	local index = 1
+	while index <= #source do
+		local one = source:sub(index, index)
+		local two = source:sub(index, index + 1)
+		if two == "--" then
+			local newline = source:find("\n", index + 2, true) or (#source + 1)
+			for position = index, newline - 1 do output[position] = " " end
+			index = newline
+		elseif one == "'" or one == '"' or one == "`" then
+			local finish = skipString(source, index)
+			for position = index, finish - 1 do output[position] = " " end
+			index = finish
+		else
+			output[index] = one
+			index += 1
+		end
+	end
+	return table.concat(output)
+end
+
+local function receiverStart(mask: string, colon: number): number
+	local paren, bracket, brace = 0, 0, 0
+	local index = colon - 1
+	while index > 0 do
+		local character = mask:sub(index, index)
+		if character == ")" then paren += 1
+		elseif character == "]" then bracket += 1
+		elseif character == "}" then brace += 1
+		elseif character == "(" then
+			if paren > 0 then paren -= 1 else break end
+		elseif character == "[" then
+			if bracket > 0 then bracket -= 1 else break end
+		elseif character == "{" then
+			if brace > 0 then brace -= 1 else break end
+		elseif paren == 0 and bracket == 0 and brace == 0
+			and character:match("[,;=+%-%*/%%%^<>\n]") then break end
+		index -= 1
+	end
+	return index + 1
+end
+
+local function rewriteSource(source: string): (string, number)
+	local rewritten = source
+	local count = 0
+	while count < 1000 do
+		local mask = codeMask(rewritten)
+		local bestStart, bestOpen, bestMethod
+		for _, method in { "FireServer", "InvokeServer" } do
+			local cursor = 1
+			while true do
+				local colon, methodEnd = mask:find(":" .. method .. "%s*%(", cursor)
+				if not colon then break end
+				local open = mask:find("(", colon, true)
+				if open and (not bestStart or colon > bestStart) then
+					bestStart, bestOpen, bestMethod = colon, open, method
+				end
+				cursor = methodEnd + 1
+			end
+		end
+		if not bestStart or not bestOpen or not bestMethod then break end
+		local start = receiverStart(mask, bestStart)
+		local receiver = rewritten:sub(start, bestStart - 1)
+		local afterOpen = mask:match("^%s*%)", bestOpen + 1) ~= nil
+		local wrapper = if bestMethod == "FireServer" then "UNC.FireServer" else "SUNC.InvokeServer"
+		local replacement = wrapper .. "(" .. receiver .. (if afterOpen then "" else ", ")
+		rewritten = rewritten:sub(1, start - 1) .. replacement .. rewritten:sub(bestOpen + 1)
+		count += 1
+	end
+	if count > 0 and not rewritten:find(HEADER, 1, true) then
+		local header = table.concat({
+			HEADER,
+			'local ReplicatedStorage = game:GetService("ReplicatedStorage")',
+			'local __HarnessX = ReplicatedStorage:WaitForChild("HarnessX")',
+			'local UNC = require(__HarnessX:WaitForChild("UNC"))',
+			'local SUNC = require(__HarnessX:WaitForChild("SUNC"))',
+			"-- </HarnessX:instrumented>",
+			"",
+		}, "\n")
+		rewritten = header .. rewritten
+	end
+	return rewritten, count
+end
+
+local function updateScript(target: Instance, transform: (string) -> string): (boolean, string?)
+	local changed = false
+	local ok, updateError = pcall(function()
+		ScriptEditorService:UpdateSourceAsync(target :: any, function(oldSource)
+			local newSource = transform(oldSource)
+			changed = newSource ~= oldSource
+			return newSource
+		end)
+	end)
+	return changed, if ok then nil else tostring(updateError)
+end
+
+local toolbar = plugin:CreateToolbar("HarnessX")
+local dashboardButton = toolbar:CreateButton("Dashboard", "Open HarnessX", "")
+local rewriteButton = toolbar:CreateButton("Rewrite", "Instrument remote calls", "")
+local backupButton = toolbar:CreateButton("Backup", "Back up eligible scripts", "")
+local toggleButton = toolbar:CreateButton("Toggle", "Toggle auto instrumentation", "")
+toggleButton:SetActive(enabled)
+
+local widget = plugin:CreateDockWidgetPluginGuiAsync(
+	"HarnessXDashboardV2",
+	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 620, 720, 380, 320)
+)
+widget.Title = "HarnessX"
+
+local COLORS = {
+	bg = Color3.fromRGB(24, 26, 31), panel = Color3.fromRGB(34, 37, 44),
+	button = Color3.fromRGB(49, 54, 64), text = Color3.fromRGB(235, 238, 245),
+	muted = Color3.fromRGB(160, 168, 182), accent = Color3.fromRGB(88, 166, 255),
+	good = Color3.fromRGB(80, 200, 120), bad = Color3.fromRGB(235, 90, 90),
+}
+
+local function make(className: string, properties: {[string]: any}, parent: Instance?): Instance
+	local instance = Instance.new(className)
+	for key, value in properties do (instance :: any)[key] = value end
+	if parent then instance.Parent = parent end
+	return instance
+end
+
+local root = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.bg, BorderSizePixel = 0 }, widget) :: Frame
+local status = make("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = COLORS.panel, BorderSizePixel = 0,
+	Text = "HarnessX bridge: connecting", TextColor3 = COLORS.muted, Font = Enum.Font.Code,
+	TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+}, root) :: TextLabel
+local tabs = make("Frame", { Position = UDim2.new(0, 0, 0, 34), Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = COLORS.panel, BorderSizePixel = 0 }, root) :: Frame
+make("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4) }, tabs)
+local content = make("Frame", { Position = UDim2.new(0, 0, 0, 70), Size = UDim2.new(1, 0, 1, -70), BackgroundTransparency = 1 }, root) :: Frame
+local pages: {[string]: Frame} = {}
+local tabButtons: {[string]: TextButton} = {}
+
+local function page(name: string): Frame
+	local frame = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, content) :: Frame
+	pages[name] = frame
+	return frame
+end
+
+local function show(name: string)
+	for key, frame in pages do frame.Visible = key == name end
+	for key, button in tabButtons do button.BackgroundColor3 = if key == name then COLORS.accent else COLORS.button end
+end
+
+local function tab(name: string)
+	local button = make("TextButton", {
+		Size = UDim2.new(0, 90, 1, 0), BackgroundColor3 = COLORS.button, BorderSizePixel = 0,
+		Text = name, TextColor3 = COLORS.text, Font = Enum.Font.SourceSansSemibold, TextSize = 14,
+	}, tabs) :: TextButton
+	tabButtons[name] = button
+	button.Activated:Connect(function() show(name) end)
+end
+
+local trafficPage, scriptsPage, controlsPage, fuzzerPage = page("Traffic"), page("Scripts"), page("Controls"), page("Fuzzer")
+tab("Traffic") tab("Scripts") tab("Controls") tab("Fuzzer")
+
+local function scrolling(parent: Instance): ScrollingFrame
+	local frame = make("ScrollingFrame", {
+		Position = UDim2.new(0, 6, 0, 6), Size = UDim2.new(1, -12, 1, -12),
+		BackgroundColor3 = COLORS.panel, BorderSizePixel = 0, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(), ScrollBarThickness = 7,
+	}, parent) :: ScrollingFrame
+	make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, frame)
+	return frame
+end
+
+local trafficList = scrolling(trafficPage)
+local scriptsList = scrolling(scriptsPage)
+local selectedScript: Instance? = nil
+local selectedRemote: Instance? = nil
+local activeSession: string? = nil
+local sequence = 0
+
+local function clearGui(parent: Instance)
+	for _, child in parent:GetChildren() do if child:IsA("GuiObject") then child:Destroy() end end
+end
+
+local function button(parent: Instance, text: string, callback: () -> ()): TextButton
+	local result = make("TextButton", {
+		Size = UDim2.new(1, -8, 0, 34), BackgroundColor3 = COLORS.button, BorderSizePixel = 0,
+		Text = text, TextColor3 = COLORS.text, Font = Enum.Font.SourceSansSemibold, TextSize = 14,
+	}, parent) :: TextButton
+	result.Activated:Connect(callback)
+	return result
+end
+
+local function backupAll()
+	local sourceMap: {[string]: string} = {}
+	for _, target in scripts() do
+		local ok, source = pcall(function() return ScriptEditorService:GetEditorSource(target :: any) end)
+		if ok then sourceMap[target:GetFullName()] = source end
+	end
+	local ok, response = request("/v1/backup/sources", "POST", { sources = sourceMap })
+	status.Text = if ok then "Backup: " .. tostring(response.folder) else "Backup failed: " .. tostring(response)
+end
+
+local function injectTrace(target: Instance)
+	local recording = ChangeHistoryService:TryBeginRecording("HarnessXTrace", "Inject HarnessX trace")
+	if not recording then return end
+	local changed, updateError = updateScript(target, function(source)
+		if source:find("-- <HarnessX:trace-injected>", 1, true) then return source end
+		local helper = table.concat({
+			"-- <HarnessX:trace-injected>",
+			"local function __HarnessTrace(kind, callback)",
+			"\tprint(\"[HarnessX] Calling\", kind)",
+			"\tlocal result = table.pack(pcall(callback))",
+			"\tprint(\"[HarnessX] Call finished\", kind)",
+			"\tif not result[1] then error(result[2], 0) end",
+			"\treturn table.unpack(result, 2, result.n)",
+			"end",
+			"-- </HarnessX:trace-injected>",
+			"",
+		}, "\n")
+		source = source:gsub("UNC%.FireServer(%b())", function(call) return '__HarnessTrace("UNC", function() return UNC.FireServer' .. call .. ' end)' end)
+		source = source:gsub("SUNC%.InvokeServer(%b())", function(call) return '__HarnessTrace("SUNC", function() return SUNC.InvokeServer' .. call .. ' end)' end)
+		return helper .. source
+	end)
+	ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+	status.Text = if updateError then updateError elseif changed then "Trace injected" else "Trace already present"
+end
+
+local function refreshScripts()
+	clearGui(scriptsList)
+	for _, target in scripts() do
+		local ok, source = pcall(function() return ScriptEditorService:GetEditorSource(target :: any) end)
+		local count = 0
+		if ok then
+			local _, unc = source:gsub("UNC%.FireServer%(", "")
+			local _, sunc = source:gsub("SUNC%.InvokeServer%(", "")
+			count = unc + sunc
+		end
+		button(scriptsList, string.format("%s  [%d]", target:GetFullName(), count), function()
+			selectedScript = target
+			status.Text = "Selected script: " .. target:GetFullName()
+		end)
+	end
+	button(scriptsList, "Inject trace into selected", function()
+		if selectedScript then injectTrace(selectedScript) end
+	end)
+	button(scriptsList, "Backup all", backupAll)
+end
+
+local function rewriteAll()
+	local recording = ChangeHistoryService:TryBeginRecording("HarnessXRewrite", "Instrument remote calls")
+	if not recording then return end
+	local calls, failures = 0, 0
+	for _, target in scripts() do
+		local _, updateError = updateScript(target, function(source)
+			local rewritten, count = rewriteSource(source)
+			calls += count
+			return rewritten
+		end)
+		if updateError then failures += 1 end
+	end
+	ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+	status.Text = string.format("Rewrote %d calls; %d failures", calls, failures)
+	refreshScripts()
+end
+
+local controls = scrolling(controlsPage)
+button(controls, "Observe mode", function() request("/v1/config/update", "POST", { sunc_mode = "observe" }) end)
+button(controls, "Mock mode", function() request("/v1/config/update", "POST", { sunc_mode = "mock" }) end)
+for _, profile in { "high", "medium", "low", "potato" } do
+	button(controls, "Profile: " .. profile, function() request("/v1/config/update", "POST", { active_profile = profile }) end)
+end
+button(controls, "Trigger diagnostics", function() request("/v1/diagnostics/trigger", "POST", {}) end)
+button(controls, "Backup all sources", backupAll)
+button(controls, "Rewrite all scripts", rewriteAll)
+
+local fuzz = scrolling(fuzzerPage)
+local remoteLabel = make("TextLabel", {
+	Size = UDim2.new(1, -8, 0, 42), BackgroundColor3 = COLORS.button, BorderSizePixel = 0,
+	Text = "Target: none", TextColor3 = COLORS.text, TextWrapped = true, Font = Enum.Font.Code, TextSize = 12,
+}, fuzz) :: TextLabel
+local schema = make("TextBox", {
+	Size = UDim2.new(1, -8, 0, 150), BackgroundColor3 = COLORS.button, BorderSizePixel = 0,
+	Text = "number:min=0,max=100\nstring:length=12", MultiLine = true, ClearTextOnFocus = false,
+	TextColor3 = COLORS.text, Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+}, fuzz) :: TextBox
+local rate = make("TextBox", { Size = UDim2.new(1, -8, 0, 34), BackgroundColor3 = COLORS.button, Text = tostring(fuzzerConfig.default_rate or 5), TextColor3 = COLORS.text, ClearTextOnFocus = false }, fuzz) :: TextBox
+local duration = make("TextBox", { Size = UDim2.new(1, -8, 0, 34), BackgroundColor3 = COLORS.button, Text = tostring(fuzzerConfig.default_duration_seconds or 30), TextColor3 = COLORS.text, ClearTextOnFocus = false }, fuzz) :: TextBox
+local fuzzResult = make("TextLabel", { Size = UDim2.new(1, -8, 0, 70), BackgroundColor3 = COLORS.panel, Text = "No active session", TextColor3 = COLORS.muted, TextWrapped = true }, fuzz) :: TextLabel
+
+local function remoteSegments(remote: Instance): {string}
+	local result = {}
+	local current: Instance? = remote
+	while current and current ~= game do table.insert(result, 1, current.Name) current = current.Parent end
+	return result
+end
+
+local function parseSchema(text: string): ({any}?, string?)
+	local result = {}
+	for line in text:gmatch("[^\r\n]+") do
+		line = line:match("^%s*(.-)%s*$") or ""
+		if line == "" or line:sub(1, 1) == "#" then continue end
+		if line:sub(1, 1) == "{" then
+			local ok, value = pcall(function() return HttpService:JSONDecode(line) end)
+			if not ok then return nil, "Invalid JSON descriptor" end
+			table.insert(result, value)
+			continue
+		end
+		local kind, optionsText = line:match("^([^:]+):?(.*)$")
+		kind = string.lower(kind or "")
+		local options: {[string]: any} = {}
+		for key, value in (optionsText or ""):gmatch("([%w_]+)=([^,]+)") do options[string.lower(key)] = tonumber(value) or value end
+		local descriptor
+		if kind == "number" then descriptor = { __type = "RandomNumber", min = options.min or 0, max = options.max or 100 }
+		elseif kind == "string" then descriptor = { __type = "RandomString", length = options.length or 12 }
+		elseif kind == "boolean" then descriptor = { __type = "RandomBoolean" }
+		elseif kind == "vector3" then descriptor = { __type = "RandomVector3", min = options.min or -100, max = options.max or 100 }
+		elseif kind == "cframe" then descriptor = { __type = "RandomCFrame", min = options.min or -100, max = options.max or 100 }
+		elseif kind == "instance" then descriptor = { __type = "InstancePath", path = options.path or "" }
+		elseif kind == "enumitem" then descriptor = { __type = "EnumItem", value = options.value or "" }
+		else return nil, "Unsupported descriptor: " .. kind end
+		table.insert(result, descriptor)
+	end
+	return result, nil
+end
+
+local function refreshRemotes()
+	for _, child in fuzz:GetChildren() do if child.Name == "RemoteChoice" then child:Destroy() end end
+	for _, remote in game:GetDescendants() do
+		if (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) and not excluded(remote) then
+			local choice = button(fuzz, remote:GetFullName(), function()
+				selectedRemote = remote
+				remoteLabel.Text = "Target: " .. remote:GetFullName()
+			end)
+			choice.Name = "RemoteChoice"
+		end
+	end
+end
+
+button(fuzz, "Refresh remote list", refreshRemotes)
+button(fuzz, "Start fuzzing", function()
+	if not selectedRemote then status.Text = "Select a remote" return end
+	local args, parseError = parseSchema(schema.Text)
+	if not args then status.Text = tostring(parseError) return end
+	local ok, response = request("/v1/fuzz/start", "POST", {
+		target = selectedRemote:GetFullName(), target_segments = remoteSegments(selectedRemote),
+		target_class = selectedRemote.ClassName, arg_types = args,
+		rate = tonumber(rate.Text), duration = tonumber(duration.Text),
+	})
+	if ok then activeSession = tostring(response.sessionId) fuzzResult.Text = "Queued: " .. activeSession
+	else fuzzResult.Text = tostring(response) end
+end)
+button(fuzz, "Stop fuzzing", function()
+	if activeSession then request("/v1/fuzz/stop/" .. HttpService:UrlEncode(activeSession), "POST", {}) end
+end)
+refreshRemotes()
+
+local trafficRows: {GuiObject} = {}
+local function addTraffic(event: any)
+	sequence = math.max(sequence, tonumber(event.seq) or 0)
+	local payload = event.payload
+	local record = if typeof(payload) == "table" then payload.record or payload else payload
+	local channel = if typeof(record) == "table" then tostring(record.channel or record.prefix or "TRACE") else "TRACE"
+	local phase = if typeof(record) == "table" then tostring(record.phase or "") else ""
+	local target = ""
+	if typeof(record) == "table" then
+		if typeof(record.remote) == "table" then target = tostring(record.remote.path or record.remote.name or "")
+		else target = tostring(record.target or "") end
+	end
+	local row = make("TextLabel", {
+		Size = UDim2.new(1, -8, 0, 38), BackgroundColor3 = COLORS.button, BorderSizePixel = 0,
+		Text = string.format("[%s/%s] %s", channel, phase, target), TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.Code, TextSize = 12,
+	}, trafficList) :: TextLabel
+	table.insert(trafficRows, row)
+	while #trafficRows > 50 do table.remove(trafficRows, 1):Destroy() end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		local ok, response = request("/v1/status", "GET", nil)
+		status.Text = if ok then string.format("Bridge online · %s · %s", response.activeProfile, response.suncMode) else "Bridge offline"
+		local trafficOk, traffic = request("/v1/traffic?after=" .. sequence .. "&limit=50", "GET", nil)
+		if trafficOk and typeof(traffic.events) == "table" then for _, event in traffic.events do addTraffic(event) end end
+		if activeSession then
+			local fuzzOk, fuzzStatus = request("/v1/fuzz/status/" .. HttpService:UrlEncode(activeSession), "GET", nil)
+			if fuzzOk and typeof(fuzzStatus.session) == "table" then
+				local session = fuzzStatus.session
+				fuzzResult.Text = string.format("%s · calls=%s · errors=%s · avg=%.2fms", session.status, session.calls, session.errors, session.averageLatencyMs or 0)
+				if session.status ~= "queued" and session.status ~= "running" then activeSession = nil end
+			end
+		end
+	end
+end)
+
+rewriteButton.Click:Connect(rewriteAll)
+backupButton.Click:Connect(backupAll)
+dashboardButton.Click:Connect(function() widget.Enabled = not widget.Enabled end)
+toggleButton.Click:Connect(function()
+	enabled = not enabled plugin:SetSetting("HarnessXEnabled", enabled) toggleButton:SetActive(enabled)
+end)
+widget:BindToClose(function() widget.Enabled = false end)
+
+if pluginConfig.auto_rewrite_on_save == true then
+	ScriptEditorService.TextDocumentDidChange:Connect(function(document)
+		if not enabled or document:IsCommandBar() then return end
+		local target = document:GetScript()
+		if not target or excluded(target) then return end
+		task.delay(1.25, function()
+			if enabled and target.Parent then updateScript(target, function(source) return (rewriteSource(source)) end) end
+		end)
+	end)
+end
+
+show("Traffic")
+refreshScripts()
+print("HarnessX Studio plugin loaded")
