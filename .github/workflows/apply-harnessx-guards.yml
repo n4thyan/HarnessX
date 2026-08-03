@@ -1,0 +1,50 @@
+name: Apply HarnessX runtime gates
+
+on:
+  push:
+    branches:
+      - global-hooks
+    paths:
+      - ".github/workflows/apply-harnessx-guards.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: global-hooks
+
+      - name: Add HarnessXEnabled guard
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          studio_guard = 'if not game:GetService("RunService"):IsStudio() then return nil end\n'
+          enabled_guard = 'if game:GetAttribute("HarnessXEnabled") ~= true then return nil end\n'
+
+          for name in ("Encoder.lua", "Fuzzer.lua", "Fuzzer.client.lua"):
+              path = Path("roblox") / name
+              source = path.read_text(encoding="utf-8")
+              if not source.startswith(studio_guard):
+                  raise SystemExit(f"{name}: missing Studio guard")
+              if source.startswith(studio_guard + enabled_guard):
+                  continue
+              source = studio_guard + enabled_guard + source[len(studio_guard):]
+              path.write_text(source, encoding="utf-8", newline="\n")
+          PY
+
+      - name: Commit runtime gates
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-harnessx-guards.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Apply HarnessX runtime opt-in gates"
+          git push origin HEAD:global-hooks
