@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# HarnessX runtime output
+backups/
+*.log
+
+# Roblox/Studio build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+sourcemap.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
