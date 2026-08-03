@@ -42,7 +42,7 @@ different and unsupported use case:
 
 **There is no supported "executor" or "live" build of HarnessX, and none is
 planned.** Contributions that weaken, bypass, or make optional any of the
-three guards above will be rejected.
+three guards above will be rejected. ;-)
 
 ## If you want to test against something closer to production
 
@@ -50,5 +50,5 @@ Use a dedicated test place (a separate published place, Team Test, or a
 private server) instead of removing the guards. HarnessX's Studio checks
 would still need to gate that context appropriately — this is a separate,
 deliberate design change, not a bypass, and should be scoped to a test
-environment your team controls, never a live game with real players.
+environment your team controls, never a live game with real players. ;-)
 
