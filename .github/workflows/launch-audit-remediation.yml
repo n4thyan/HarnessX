@@ -1,11 +1,6 @@
 name: Launch HarnessX audit remediation
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/launch-audit-remediation.yml"
   pull_request:
     branches:
       - main
@@ -32,13 +27,26 @@ jobs:
           import base64
           import gzip
           import re
+          import subprocess
 
-          workflow = Path('.github/workflows/apply-audit-runtime.yml').read_text(encoding='utf-8')
+          workflow = subprocess.check_output(
+              [
+                  "git",
+                  "show",
+                  "270750059f08ec32c923ad49e570e5792c1982b4:.github/workflows/apply-audit-runtime.yml",
+              ],
+              text=True,
+          )
           match = re.search(r"echo '([^']+)' \| base64 -d", workflow)
           if match is None:
-              raise SystemExit('staged remediation payload not found')
-          payload = gzip.decompress(base64.b64decode(match.group(1)))
-          Path('/tmp/apply_audit_runtime.py').write_bytes(payload)
+              raise SystemExit("immutable remediation payload not found")
+
+          payload = gzip.decompress(base64.b64decode(match.group(1))).decode("utf-8")
+          payload = payload.replace(
+              "re.subn(pattern, replacement, text, count=1, flags=re.S)",
+              "re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)",
+          )
+          Path("/tmp/apply_audit_runtime.py").write_text(payload, encoding="utf-8")
           PY
           python /tmp/apply_audit_runtime.py
           python -m compileall -q server
