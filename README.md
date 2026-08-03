@@ -13,6 +13,8 @@ if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 
 `HarnessXEnabled` is an additional opt-in switch inside Studio. It does not bypass the Studio guard.
 
+Detailed guardrails and trust classifications are documented in [`SECURITY_BOUNDARIES.md`](SECURITY_BOUNDARIES.md).
+
 ```text
 config.json
 roblox/Core.lua
