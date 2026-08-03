@@ -80,6 +80,39 @@ local getPerformanceStats = ensureChild(
 	"GetPerformanceStats"
 ) :: BindableFunction
 
+local function initializeAutoProxyQuickStart()
+	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+	if remotesFolder == nil then
+		return
+	end
+
+	local autoProxyModule = packageFolder:FindFirstChild("AutoProxy")
+	if autoProxyModule == nil or not autoProxyModule:IsA("ModuleScript") then
+		warn("HarnessX quick start skipped: ReplicatedStorage.HarnessX.AutoProxy is missing.")
+		return
+	end
+
+	local requireOk, AutoProxy = pcall(require, autoProxyModule)
+	if not requireOk or typeof(AutoProxy) ~= "table" then
+		warn("HarnessX quick start failed to load AutoProxy: " .. tostring(AutoProxy))
+		return
+	end
+
+	local wrapOk, wrapped = pcall(AutoProxy.wrapFolder, remotesFolder)
+	if not wrapOk then
+		warn("HarnessX quick start failed to wrap ReplicatedStorage.Remotes: " .. tostring(wrapped))
+		return
+	end
+
+	-- _G is scoped to this Luau VM. Core normally runs on the server, so
+	-- client code that needs FireServer/InvokeServer proxies should call
+	-- AutoProxy.wrapFolder() from its own LocalScript VM.
+	_G.HarnessXRemotes = wrapped
+	print("HarnessX quick start: _G.HarnessXRemotes is ready.")
+end
+
+task.defer(initializeAutoProxyQuickStart)
+
 local function httpRequest(path: string, method: string, body: string?): (boolean, any)
 	local options: {[string]: any} = {
 		Url = BRIDGE_URL .. path,

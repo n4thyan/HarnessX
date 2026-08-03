@@ -1,4 +1,5 @@
 if not game:GetService("RunService"):IsStudio() then return nil end
+if game:GetAttribute("HarnessXEnabled") ~= true then return nil end
 
 assert(plugin, "Plugin.lua must run as a Roblox Studio plugin")
 
@@ -41,6 +42,9 @@ if not configOk or typeof(bridgeConfig) ~= "table" then bridgeConfig = {} end
 local pluginConfig = if typeof(bridgeConfig.plugin) == "table" then bridgeConfig.plugin else {}
 local fuzzerConfig = if typeof(bridgeConfig.fuzzer) == "table" then bridgeConfig.fuzzer else {}
 local excludeAttribute = tostring(pluginConfig.exclude_scripts_with_attribute or IGNORE_ATTRIBUTE)
+local wrapperStyle = if string.lower(tostring(pluginConfig.wrapper_style or "UNC")) == "remoteproxy"
+	then "RemoteProxy"
+	else "UNC"
 
 local function isScript(instance: Instance): boolean
 	return instance:IsA("Script") or instance:IsA("LocalScript") or instance:IsA("ModuleScript")
@@ -142,22 +146,44 @@ local function rewriteSource(source: string): (string, number)
 		local start = receiverStart(mask, bestStart)
 		local receiver = rewritten:sub(start, bestStart - 1)
 		local afterOpen = mask:match("^%s*%)", bestOpen + 1) ~= nil
-		local wrapper = if bestMethod == "FireServer" then "UNC.FireServer" else "SUNC.InvokeServer"
-		local replacement = wrapper .. "(" .. receiver .. (if afterOpen then "" else ", ")
+		local replacement: string
+		if wrapperStyle == "RemoteProxy" then
+			replacement = "__rp.wrap(" .. receiver .. "):" .. bestMethod .. "("
+		else
+			local wrapper = if bestMethod == "FireServer" then "UNC.FireServer" else "SUNC.InvokeServer"
+			replacement = wrapper .. "(" .. receiver .. (if afterOpen then "" else ", ")
+		end
 		rewritten = rewritten:sub(1, start - 1) .. replacement .. rewritten:sub(bestOpen + 1)
 		count += 1
 	end
-	if count > 0 and not rewritten:find(HEADER, 1, true) then
-		local header = table.concat({
-			HEADER,
-			'local ReplicatedStorage = game:GetService("ReplicatedStorage")',
-			'local __HarnessX = ReplicatedStorage:WaitForChild("HarnessX")',
-			'local UNC = require(__HarnessX:WaitForChild("UNC"))',
-			'local SUNC = require(__HarnessX:WaitForChild("SUNC"))',
-			"-- </HarnessX:instrumented>",
-			"",
-		}, "\n")
-		rewritten = header .. rewritten
+	if count > 0 then
+		if wrapperStyle == "RemoteProxy" then
+			local requireLine = 'local __rp = require(game.ReplicatedStorage.HarnessX.RemoteProxy)'
+			if not rewritten:find(requireLine, 1, true) then
+				if rewritten:find(HEADER, 1, true) then
+					rewritten = rewritten:gsub(HEADER, HEADER .. "\n" .. requireLine, 1)
+				else
+					local header = table.concat({
+						HEADER,
+						requireLine,
+						"-- </HarnessX:instrumented>",
+						"",
+					}, "\n")
+					rewritten = header .. rewritten
+				end
+			end
+		elseif not rewritten:find(HEADER, 1, true) then
+			local header = table.concat({
+				HEADER,
+				'local ReplicatedStorage = game:GetService("ReplicatedStorage")',
+				'local __HarnessX = ReplicatedStorage:WaitForChild("HarnessX")',
+				'local UNC = require(__HarnessX:WaitForChild("UNC"))',
+				'local SUNC = require(__HarnessX:WaitForChild("SUNC"))',
+				"-- </HarnessX:instrumented>",
+				"",
+			}, "\n")
+			rewritten = header .. rewritten
+		end
 	end
 	return rewritten, count
 end
@@ -309,7 +335,8 @@ local function refreshScripts()
 		if ok then
 			local _, unc = source:gsub("UNC%.FireServer%(", "")
 			local _, sunc = source:gsub("SUNC%.InvokeServer%(", "")
-			count = unc + sunc
+			local _, remoteProxy = source:gsub("__rp%.wrap%(", "")
+			count = unc + sunc + remoteProxy
 		end
 		button(scriptsList, string.format("%s  [%d]", target:GetFullName(), count), function()
 			selectedScript = target
