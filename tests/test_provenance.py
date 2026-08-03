@@ -25,7 +25,10 @@ class ProvenanceBuildTests(unittest.TestCase):
         return output / MANIFEST_NAME
 
     def test_build_is_reproducible_for_identical_inputs(self) -> None:
-        with tempfile.TemporaryDirectory() as first_temp, tempfile.TemporaryDirectory() as second_temp:
+        with (
+            tempfile.TemporaryDirectory() as first_temp,
+            tempfile.TemporaryDirectory() as second_temp,
+        ):
             first = Path(first_temp)
             second = Path(second_temp)
             first_manifest = self.build(first)
@@ -61,6 +64,28 @@ class ProvenanceBuildTests(unittest.TestCase):
 
             with self.assertRaises(VerificationError):
                 verify_manifest(manifest_path)
+
+    def test_missing_checksum_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            manifest_path = self.build(output)
+            (output / "SHA256SUMS").unlink()
+
+            with self.assertRaises(VerificationError):
+                verify_manifest(manifest_path)
+
+    def test_banner_breakout_metadata_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ValueError):
+                build_artifact(
+                    source_path=SOURCE,
+                    output_dir=Path(temporary),
+                    repository="n4thyan/HarnessX",
+                    version="v1]]\nprint('forged')",
+                    commit="0123456789abcdef0123456789abcdef01234567",
+                    channel="ci",
+                    built_at="2026-08-03T17:00:00Z",
+                )
 
 
 if __name__ == "__main__":
